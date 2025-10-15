@@ -1,0 +1,38 @@
+{
+    "healthy": [
+     "healthy indoor houseplant leaf, uniform green color, no spots",
+     "foglia sana di pianta da interno, verde uniforme, nessuna macchia"
+    ],
+    "powdery_mildew": [
+     "indoor plant leaf with powdery white patches (powdery mildew)",
+     "foglia di pianta da interno con patina bianca polverosa (oidio)"
+    ],
+    "leaf_spot": [
+     "indoor plant leaf with brown circular spots and yellow halo (leaf spot)",
+     "foglia con macchie circolari marroni e alone giallo (macchia fogliare)"
+    ],
+    "root_rot": [
+     "indoor plant with drooping yellow leaves, soggy soil, possible root rot",
+     "pianta da interno con foglie flosce e gialle, terriccio zuppo (marciume radicale)"
+    ],
+    "mosaic_virus": [
+     "leaf with yellow-green mosaic pattern and vein discoloration (mosaic virus)",
+     "foglia con motivo a mosaico giallo-verde e nervature scolorite (virus del mosaico)"
+    ],
+    "overwatering": [
+     "indoor plant leaf yellowing uniformly due to overwatering, wet soil",
+     "ingiallimento uniforme da eccesso d'acqua, terriccio bagnato"
+    ],
+    "underwatering": [
+     "indoor plant leaf dry and curled edges due to underwatering",
+     "foglia secca con margini arricciati per scarsa irrigazione"
+    ],
+    "light_stress": [
+     "indoor plant leaf with sunburn: bleached or brown crispy patches",
+     "foglia con bruciature da luce, zone sbiadite o bruciate"
+    ],
+    "nutrient_def": [
+     "indoor plant leaf with interveinal chlorosis (nutrient deficiency)",
+     "foglia con clorosi tra le nervature (carenza nutritiva)"
+    ]
+   }
