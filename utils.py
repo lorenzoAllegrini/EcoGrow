@@ -2,9 +2,12 @@ import os
 from typing import List, Tuple, Dict, Optional
 from PIL import Image
 import torch
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
+from functools import partial
+from collections import defaultdict
 
-# ---------- Dataset leggero ----------
+
+
 class PlantSamplesDataset(Dataset):
     def __init__(self, items: List[Tuple[str, str]], preprocess, segment_fn=None):
         """
@@ -73,12 +76,12 @@ class PlantDataModule:
         self._build_all()
 
     # ---------- API pubblica ----------
-    def get_train(self, plant_name: Optional[str] = None) -> DataLoader:
-        return self._get_loader(split="train", plant_name=plant_name)
+    def get_train(self, plant_name: Optional[str] = None, shots: Optional[int] = None, per_class: Optional[bool] = True) -> DataLoader:
+        return self._get_loader(split="train", plant_name=plant_name, shots=shots, per_class=per_class)
 
-    def get_val(self, plant_name: Optional[str] = None) -> DataLoader:
+    def get_val(self, plant_name: Optional[str] = None, shots: Optional[int] = None) -> DataLoader:
         split = "valid" if "valid" in self._grouped_index else "val" if "val" in self._grouped_index else "test"
-        return self._get_loader(split=split, plant_name=plant_name)
+        return self._get_loader(split=split, plant_name=plant_name, shots=shots)
 
     def get_test(self, plant_name: Optional[str] = None) -> DataLoader:
         return self._get_loader(split="test", plant_name=plant_name)
@@ -104,13 +107,57 @@ class PlantDataModule:
             self._loaders_per_plant[split] = self._make_loaders_per_plant(grouped_index, split)
             self._combined_loaders[split] = self._make_combined_loader(self._loaders_per_plant[split], split)
 
-    def _get_loader(self, split: str, plant_name: Optional[str]):
+    def _make_subset_loader(self, loader, shots: int, per_class: bool = True):
+        """
+        Crea un nuovo DataLoader che usa solo 'shots' esempi dal dataset originale.
+        Se per_class=True, prende 'shots' esempi per ciascuna classe.
+        """
+        ds = loader.dataset
+        bs = loader.batch_size
+        nw = loader.num_workers
+        pm = loader.pin_memory
+
+        if shots is None or shots <= 0:
+            return loader  # niente subset
+
+        if not per_class:
+            # primi 'shots' esempi nel dataset
+            idx = list(range(min(shots, len(ds))))
+        else:
+            # k-shot per classe (richiede __getitem__ -> (x, y))
+            buckets = defaultdict(list)
+            idx = []
+            for i in range(len(ds)):
+                # estrai l'etichetta senza caricare tutte le trasformazioni pesanti
+                x, y = ds[i]           # se è costoso, valuta un indice leggero in ds
+                y_i = int(y)
+                if len(buckets[y_i]) < shots:
+                    buckets[y_i].append(i)
+                    idx.append(i)
+                # se tutte le classi raggiungono k, fermati
+                # (stima del #classi: max label visto + 1; oppure quando nessuna cresce)
+                if all(len(b) >= shots for b in buckets.values()):
+                    break
+            # opzionale: ordina per stabilità
+            idx.sort()
+
+        subset = Subset(ds, idx)
+        small_loader = DataLoader(
+            subset,
+            batch_size=bs,
+            shuffle=True,          # in debug: no shuffle; metti True se preferisci
+            num_workers=nw,
+            pin_memory=pm,
+        )
+        return small_loader
+
+    def _get_loader(self, split: str, plant_name: Optional[str], shots: Optional[int] = None, per_class: bool = True):
         if split not in self._combined_loaders:
             raise ValueError(f"Split '{split}' not available in dataset located at {self.dataset_path}")
 
         if plant_name is None:
             loader, _, _ = self._combined_loaders[split]
-            return loader
+            return self._make_subset_loader(loader, shots, per_class)
 
         per_plant = self._loaders_per_plant.get(split, {})
         if plant_name not in per_plant:
@@ -118,7 +165,7 @@ class PlantDataModule:
             raise ValueError(f"Plant '{plant_name}' not available for split '{split}'. Available plants: {available}")
 
         loader, _, _ = per_plant[plant_name]
-        return loader
+        return self._make_subset_loader(loader, shots, per_class)
 
     def _build_grouped_index(self, split: str) -> Dict[str, List[Tuple[str, str]]]:
         split_dir = os.path.join(self.dataset_path, split)
@@ -226,11 +273,23 @@ class PlantDataModule:
         )
         return loader, idx2label, label2idx
 
+def _segment_pipeline(
+    img_rgb: Image.Image,
+    segment_plant_rgba,
+    crop_to_alpha_bbox,
+    black_bg_composite,
+    pad: int,
+):
+    rgba = segment_plant_rgba(img_rgb)
+    rgba = crop_to_alpha_bbox(rgba, pad=pad)
+    return black_bg_composite(rgba)
 
 # ---------- (opzionale) builder per segment_fn con le tue util ----------
 def make_segment_fn(segment_plant_rgba, crop_to_alpha_bbox, black_bg_composite, pad=12):
-    def _fn(img_rgb: Image.Image) -> Image.Image:
-        rgba = segment_plant_rgba(img_rgb)
-        rgba = crop_to_alpha_bbox(rgba, pad=pad)
-        return black_bg_composite(rgba)
-    return _fn
+    return partial(
+        _segment_pipeline,
+        segment_plant_rgba=segment_plant_rgba,
+        crop_to_alpha_bbox=crop_to_alpha_bbox,
+        black_bg_composite=black_bg_composite,
+        pad=pad,
+    )

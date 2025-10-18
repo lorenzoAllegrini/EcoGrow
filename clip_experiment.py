@@ -101,8 +101,9 @@ def main():
     model_name = "ViT-B-32"
     model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained="laion2b_s34b_b79k")
     tokenizer = open_clip.get_tokenizer(model_name)
+    model.float()
     model = model.to(device).eval()
-    text_encoder = TextEncoderOpenCLIP(model).to(device).eval()
+    text_encoder = TextEncoderOpenCLIP(model).float().to(device).eval()
 
     segment_fn = make_segment_fn(
         segment_plant_rgba,
@@ -115,7 +116,7 @@ def main():
         dataset_path=dataset.location,
         preprocess=preprocess,
         segment_fn=segment_fn,
-        batch_size=16,
+        batch_size=1,
         shuffle_train=True,
         num_workers=4,
         pin_memory=True,
@@ -126,16 +127,16 @@ def main():
     for p in model.parameters():
         p.requires_grad_(False)
 
-    epochs = 5
-    trainer = PromptTuningTrainer(model, text_encoder, device, temperature=0.01)
-
+    epochs = 2
+    trainer = PromptTuningTrainer(model, text_encoder, device, temperature=0.07)
+    
     results = {}
 
     for plant_name, plant_info in classes.items():
         if "diseases" not in plant_info:
             continue
 
-        train_loader = dm.get_train(plant_name)
+        train_loader = dm.get_train(plant_name)#, shots=20, per_class=True
         try:
             val_loader = dm.get_val(plant_name)
         except ValueError:
@@ -158,6 +159,8 @@ def main():
             class_token_position="end",
             model_name=model_name,
         ).to(device)
+        for n, p in prompt_learner.named_parameters():
+            p.requires_grad = True
 
         prompts_per_class = []
         for cls in class_order:
@@ -170,14 +173,13 @@ def main():
         init_ctx_from_prompts(prompt_learner, model, tokenizer, prompts_per_class, alpha_seed=0.3)
 
         optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=1e-3, weight_decay=0.0)
-
         history = trainer.fit(
             prompt_learner,
             optimizer,
             train_loader,
             epochs=epochs,
             val_loader=val_loader,
-            grad_clip=1.0,
+            grad_clip=None,
             log_fn=lambda msg, plant=plant_name: print(f"[{plant}] {msg}"),
         )
 

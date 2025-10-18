@@ -22,19 +22,20 @@ class TextEncoderOpenCLIP(nn.Module):
     def _encode(self, x, tokenized_prompts):
         # x: [C, L, D]
         C, L, D = x.shape
-        pos = self.positional_embedding[:L, :].to(x.dtype)  # [L, D]
-        x = x + pos.unsqueeze(0)                            # [C, L, D]
-        x = x.permute(1, 0, 2)                              # [L, C, D]
-        # open_clip transformer accetta attn_mask registrata internamente
-        x = self.transformer(x)                             # [L, C, D]
-        x = x.permute(1, 0, 2)                              # [C, L, D]
-        x = self.ln_final(x)                                # [C, L, D]
+        pos = self.positional_embedding[:L, :].to(x.dtype)
+        x = x + pos.unsqueeze(0)
+        x = self.transformer(x)           # [L,C,D] se il tuo transformer vuole [L,C,D], altrimenti regola i permute
+        x = x.permute(1, 0, 2) if x.shape[0] == L else x  # mantieni [C,L,D]
+        x = self.ln_final(x)
 
-        # posizione EOT per ogni classe (heuristic standard: argmax dell’ID > 0)
-        # tokenized_prompts: [C, L]
-        eot_idx = tokenized_prompts.argmax(dim=-1)          # [C]
-        feats = x[torch.arange(C), eot_idx]                 # [C, D]
-        feats = feats @ self.text_projection.T              # [C, D_out]
+        # --- EOT SHIFT FIX ---
+        # L0 = lunghezza dei token originali (senza ctx)
+        L0 = tokenized_prompts.shape[-1]
+        shift = L - L0                     # = n_ctx, in tutti i posizionamenti ('end','middle','front')
+        eot_idx = tokenized_prompts.argmax(dim=-1) + shift  # [C]
+
+        feats = x[torch.arange(C), eot_idx]   # [C, D]
+        feats = feats @ self.text_projection.T
         return feats
 
     def forward(self, prompts_embeds, tokenized_prompts):
