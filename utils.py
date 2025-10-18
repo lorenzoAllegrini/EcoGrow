@@ -1,136 +1,220 @@
 import os
+from typing import List, Tuple, Dict, Optional
 from PIL import Image
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import open_clip
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 
-class PromptLearner(nn.Module):
-    def __init__(self, classnames, clip_model, n_ctx=8, dtype=torch.float32, device='cuda'):
-        super().__init__()
-        self.classnames = classnames
-        self.device = device
+# ---------- Dataset leggero ----------
+class PlantSamplesDataset(Dataset):
+    def __init__(self, items: List[Tuple[str, str]], preprocess, segment_fn=None):
+        """
+        items: [(condition, img_path), ...]
+        preprocess: trasformazione (es. CLIP preprocess)
+        segment_fn: opzionale, PIL.Image -> PIL.Image (RGB)
+        """
+        self.items = items
+        self.preprocess = preprocess
+        self.segment_fn = segment_fn
 
-        # tokenizer e embedding del text encoder di CLIP
-        self.model = clip_model
-        self.tokenizer = open_clip.get_tokenizer("ViT-B-32")
-        # dimensione embedding testo (di solito 512)
-        self.ctx_dim = self.model.text_projection.shape[0] if hasattr(self.model, "text_projection") else 512
+        labels = sorted({cond for cond, _ in items})
+        self.label2idx = {c: i for i, c in enumerate(labels)}
+        self.idx2label = {i: c for c, i in self.label2idx.items()}
 
-        # contesti learnable per classe: [num_class, n_ctx, ctx_dim]
-        self.n_ctx = n_ctx
-        self.ctx = nn.Parameter(torch.empty(len(classnames), n_ctx, self.ctx_dim, dtype=dtype))
-        nn.init.normal_(self.ctx, std=0.02)
+    def __len__(self):
+        return len(self.items)
 
-        # tokenizzazione dei nomi classe (fissi)
-        texts = [name.replace("_", " ") for name in classnames]  # es: "Leaf Tip Necrosis"
-        self.name_tokens = self.tokenizer(texts)
+    def __getitem__(self, idx):
+        cond, img_path = self.items[idx]
+        img = Image.open(img_path).convert("RGB")
+        if self.segment_fn is not None:
+            img = self.segment_fn(img)
+        x = self.preprocess(img)
+        y = self.label2idx[cond]
+        return x, torch.tensor(y, dtype=torch.long)
 
-        # otteniamo gli embedding dei token “veri” dal text encoder (buffer, no grad)
-        with torch.no_grad():
-            # embedding lookup layer interno
-            self.token_embedding = self.model.token_embedding
-            self.name_embeds = self.token_embedding(self.name_tokens).to(device)
 
-    def forward(self):
-        # Costruisce le sequenze [SOT] + ctx(1..n_ctx) + name_tokens + [EOT]
-        # L'encoder di CLIP aggiunge SOT/EOT internamente in open_clip, quindi costruiamo i “middle tokens”
-        B = len(self.classnames)
-        # context: [C, n_ctx, D]
-        ctx = self.ctx  # learnable
-        # name_embeds: [C, L, D]
-        name = self.name_embeds
-        # concatena su dim token
-        prompts_embeds = torch.cat([ctx, name], dim=1)  # [C, n_ctx+L, D]
-        return prompts_embeds  # embedding pronti per l'encoder testo
+# ---------- DataModule unico ----------
+class PlantDataModule:
+    """
+    Costruisce DataLoader per split (train/valid/test), per pianta o combinati.
 
-def encode_class_prompts(model, prompt_learner, device):
-    # ricrea i token per le frasi “dummy” con n_ctx placeholder (es: "x " * n_ctx + class name)
-    # ma più semplice: usa token per class name e sostituisci i primi n_ctx embedding.
-    tokens = prompt_learner.name_tokens.to(device)             # [C, L]
-    # embedding originali dei token
-    token_embeds = model.token_embedding(tokens)               # [C, L, D]
-    # prepend dei ctx learnable
-    C, L, D = token_embeds.shape
-    ctx = prompt_learner.ctx                                   # [C, n_ctx, D]
-    text_embeds = torch.cat([ctx, token_embeds], dim=1)        # [C, n_ctx+L, D]
+    Esempio:
+        dm = PlantDataModule(dataset_path, preprocess, segment_fn=seg_fn)
+        loader = dm.get_train()                  # tutte le piante combinate
+        loader_mp = dm.get_train("Money_Plant")  # solo Money_Plant
+        idx2label = dm.get_label_map("Money_Plant", split="train")["idx2label"]
+    """
+    def __init__(self,
+                 dataset_path: str,
+                 preprocess,
+                 segment_fn=None,
+                 batch_size: int = 16,
+                 shuffle_train: bool = True,
+                 num_workers: int = 4,
+                 pin_memory: bool = True,
+                 splits: Tuple[str, ...] = ("train", "valid", "test")):
+        self.dataset_path = dataset_path
+        self.preprocess = preprocess
+        self.segment_fn = segment_fn
+        self.batch_size = batch_size
+        self.shuffle_train = shuffle_train
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.splits = splits
 
-    # costruisci position embeddings coerenti (CLIP usa pos_embed per lunghezza fissa)
-    # taglio/padding se serve al max_len del tokenizer
-    max_len = model.positional_embedding.shape[0]              # lunghezza massima
-    if text_embeds.shape[1] > max_len:
-        text_embeds = text_embeds[:, :max_len, :]
-    else:
-        pad = max_len - text_embeds.shape[1]
-        pad_zeros = torch.zeros(C, pad, D, device=device, dtype=text_embeds.dtype)
-        text_embeds = torch.cat([text_embeds, pad_zeros], dim=1)
+        # Dizionari:
+        #  - per split -> { plant_name: [(cond, path), ...] }
+        #  - per split -> { plant_name: (loader, idx2label, label2idx) }
+        self._grouped_index: Dict[str, Dict[str, List[Tuple[str, str]]]] = {}
+        self._loaders_per_plant: Dict[str, Dict[str, Tuple[DataLoader, Dict[int, str], Dict[str, int]]]] = {}
+        self._combined_loaders: Dict[str, Tuple[DataLoader, Dict[int, str], Dict[str, int]]] = {}
 
-    # aggiungi positional embedding e passa nell’encoder testo
-    x = text_embeds + model.positional_embedding               # [C, max_len, D]
-    x = x.permute(1, 0, 2)  # NLD -> LND per i transformer di open_clip
-    x = model.transformer(x)                                   # [L, C, D]
-    x = x.permute(1, 0, 2)  # back to [C, L, D]
-    x = model.ln_final(x)
-    # prendi il token EOT come rappresentazione (open_clip usa indice del token EOT; qui usiamo il pooling sul ultimo non-zero)
-    # semplice: usa media sui primi (n_ctx + L originali) non paddati
-    # (più fedele sarebbe individuare l’indice EOT dal tokenizer)
-    rep = x.mean(dim=1)                                        # [C, D]
-    # proietta
-    if hasattr(model, "text_projection"):
-        rep = rep @ model.text_projection                      # [C, D_text]
-    rep = F.normalize(rep, dim=-1)
-    return rep  # [num_class, D]
+        # Costruisci tutto
+        self._build_all()
 
-def train_prompt_learning(model, prompt_learner, dataloader, device, epochs=5, lr=5e-3, temperature=0.02):
-    model.eval()  # congela CLIP
-    for p in model.parameters():
-        p.requires_grad_(False)
+    # ---------- API pubblica ----------
+    def get_train(self, plant_name: Optional[str] = None) -> DataLoader:
+        return self._get_loader(split="train", plant_name=plant_name)
 
-    opt = torch.optim.AdamW(prompt_learner.parameters(), lr=lr, weight_decay=1e-4)
+    def get_val(self, plant_name: Optional[str] = None) -> DataLoader:
+        split = "valid" if "valid" in self._grouped_index else "val" if "val" in self._grouped_index else "test"
+        return self._get_loader(split=split, plant_name=plant_name)
 
-    for ep in range(epochs):
-        total, correct, loss_sum = 0, 0, 0.0
-        for images, labels in dataloader:  # images: list of PIL o tensor già preprocess; labels: int
-            images = images.to(device)
-            labels = labels.to(device)
+    def get_test(self, plant_name: Optional[str] = None) -> DataLoader:
+        return self._get_loader(split="test", plant_name=plant_name)
 
-            with torch.no_grad():
-                img_f = model.encode_image(images)
-                img_f = F.normalize(img_f, dim=-1)  # [B,D]
-
-            # forward prompt learner -> text feats [C,D]
-            text_f = encode_class_prompts(model, prompt_learner, device)  # [C,D]
-
-            logits = img_f @ text_f.T         # [B,C]
-            loss = F.cross_entropy((logits/temperature), labels)
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-            preds = logits.argmax(dim=1)
-            total += labels.numel()
-            correct += (preds == labels).sum().item()
-            loss_sum += loss.item()*labels.numel()
-
-        print(f"epoch {ep+1}: loss={loss_sum/total:.4f}, acc={correct/total:.3f}")
-
-def get_img_dataset(dataset_path, split="valid"):
-    split_dir = os.path.join(dataset_path, split)
-    res = []
-    for folder in os.listdir(split_dir):
-        parts = folder.split("_")
-
-        if len(parts) > 2:
-            plant_name = "_".join(parts[:2])            # es. "Snake Plant"
-            condition = "_".join(parts[2:])             # es. "Leaf Withering"
+    def get_label_map(self, plant_name: Optional[str], split: str = "train") -> Dict[str, Dict]:
+        """
+        Ritorna i mapping per una pianta o per il combinato dello split.
+        """
+        if plant_name is None:
+            _, idx2label, label2idx = self._combined_loaders[split]
+            return {"idx2label": idx2label, "label2idx": label2idx}
         else:
-            plant_name = parts[0]
-            condition = parts[1] if len(parts) > 1 else "Unknown"
+            loader, idx2label, label2idx = self._loaders_per_plant[split][plant_name]
+            return {"idx2label": idx2label, "label2idx": label2idx}
 
-        folder_path = os.path.join(split_dir, folder)
-        for img_file in os.listdir(folder_path):
-            img_path = os.path.join(folder_path, img_file)
-            img = Image.open(img_path).convert("RGB")
-            res.append((plant_name, condition, img))
-    return res
+    # ---------- Interni ----------
+    def _build_all(self):
+        for split in self.splits:
+            if not os.path.isdir(os.path.join(self.dataset_path, split)):
+                continue
+            grouped_index = self._build_grouped_index(split)
+            self._grouped_index[split] = grouped_index
+            self._loaders_per_plant[split] = self._make_loaders_per_plant(grouped_index, split)
+            self._combined_loaders[split] = self._make_combined_loader(self._loaders_per_plant[split], split)
+
+    def _build_grouped_index(self, split: str) -> Dict[str, List[Tuple[str, str]]]:
+        split_dir = os.path.join(self.dataset_path, split)
+        grouped: Dict[str, List[Tuple[str, str]]] = {}
+        for folder in os.listdir(split_dir):
+            folder_path = os.path.join(split_dir, folder)
+            if not os.path.isdir(folder_path):
+                continue
+            parts = folder.split("_")
+            if len(parts) > 2:
+                plant_name = "_".join(parts[:2])
+                condition  = "_".join(parts[2:])
+            else:
+                plant_name = parts[0]
+                condition  = parts[1] if len(parts) > 1 else "Unknown"
+
+            for fname in os.listdir(folder_path):
+                if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
+                    continue
+                img_path = os.path.join(folder_path, fname)
+                grouped.setdefault(plant_name, []).append((condition, img_path))
+        return grouped
+
+    def _make_loaders_per_plant(self, grouped_index: Dict[str, List[Tuple[str, str]]], split: str):
+        out = {}
+        # shuffle True solo sul train
+        do_shuffle = self.shuffle_train if split == "train" else False
+        for plant, items in grouped_index.items():
+            ds = PlantSamplesDataset(items, self.preprocess, segment_fn=self.segment_fn)
+            loader = DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=do_shuffle,
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+            )
+            out[plant] = (loader, ds.idx2label, ds.label2idx)
+        return out
+
+    def _make_combined_loader(self, per_plant: Dict[str, Tuple[DataLoader, Dict[int, str], Dict[str, int]]], split: str):
+        """
+        Crea un DataLoader combinato con tutte le piante.
+        Unifica i label space per split, preservando le classi per pianta senza collisioni
+        (prefissa le label con il nome pianta).
+        """
+        # Costruisci un dataset combinato “on-the-fly”
+        datasets = []
+        global_labels = set()
+        for plant, (loader, idx2label, label2idx) in per_plant.items():
+            # Ricrea il dataset (prendiamo dagli loader i dataset originali)
+            ds: PlantSamplesDataset = loader.dataset
+            # Rimappa le etichette in uno spazio globale: "PlantName|Condition"
+            items_relabel = []
+            for cond, img_path in ds.items:
+                gcond = f"{plant}|{cond}"
+                items_relabel.append((gcond, img_path))
+                global_labels.add(gcond)
+            datasets.append(PlantSamplesDataset(items_relabel, ds.preprocess, segment_fn=ds.segment_fn))
+
+        if not datasets:
+            # dataset vuoto per quello split
+            empty = PlantSamplesDataset([], self.preprocess, segment_fn=self.segment_fn)
+            loader = DataLoader(empty, batch_size=self.batch_size)
+            return loader, {}, {}
+
+        combo = ConcatDataset(datasets)
+
+        # Per costruire idx2label/label2idx globali, usiamo l’unione ordinata
+        global_labels = sorted(global_labels)
+        label2idx = {c: i for i, c in enumerate(global_labels)}
+        idx2label = {i: c for c, i in label2idx.items()}
+
+        # Wrapper per applicare preprocess/segment e mapping globale
+        class _Wrapper(Dataset):
+            def __init__(self, concat_ds, label2idx):
+                self.concat_ds = concat_ds      # ConcatDataset di PlantSamplesDataset
+                self.label2idx = label2idx
+            def __len__(self):
+                return len(self.concat_ds)
+            def __getitem__(self, idx):
+                # Estrae (x, y_local) ma ignora y_local: ricalcola globalmente
+                # Recupera la coppia originale cond/path per rietichettare
+                sub_idx = idx
+                for ds in self.concat_ds.datasets:
+                    if sub_idx < len(ds):
+                        cond, img_path = ds.items[sub_idx]
+                        # ds.items qui contiene (gcond, path)
+                        break
+                    sub_idx -= len(ds)
+                # Ricrea tensore con lo stesso preprocess/segment
+                img = Image.open(img_path).convert("RGB")
+                if ds.segment_fn is not None:
+                    img = ds.segment_fn(img)
+                x = ds.preprocess(img)
+                y = self.label2idx[cond]
+                return x, torch.tensor(y, dtype=torch.long)
+
+        wrapped = _Wrapper(combo, label2idx)
+        loader = DataLoader(
+            wrapped,
+            batch_size=self.batch_size,
+            shuffle=(self.shuffle_train if split == "train" else False),
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+        )
+        return loader, idx2label, label2idx
+
+
+# ---------- (opzionale) builder per segment_fn con le tue util ----------
+def make_segment_fn(segment_plant_rgba, crop_to_alpha_bbox, black_bg_composite, pad=12):
+    def _fn(img_rgb: Image.Image) -> Image.Image:
+        rgba = segment_plant_rgba(img_rgb)
+        rgba = crop_to_alpha_bbox(rgba, pad=pad)
+        return black_bg_composite(rgba)
+    return _fn
