@@ -1,10 +1,11 @@
 import os
-from typing import List, Tuple, Dict, Optional, Union, Sequence, Callable
+from typing import List, Tuple, Dict, Optional, Union, Sequence, Callable, Set
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
 from functools import partial
 from collections import defaultdict
+import warnings
 from torchvision.transforms import Compose
 
 
@@ -129,20 +130,31 @@ class PlantDataModule:
         else:
             # k-shot per classe (richiede __getitem__ -> (x, y))
             buckets = defaultdict(list)
-            idx = []
+            label_ids = self._collect_label_ids(ds)
+            labels_seen: Set[int] = set()
+
             for i in range(len(ds)):
                 # estrai l'etichetta senza caricare tutte le trasformazioni pesanti
-                x, y = ds[i]           # se è costoso, valuta un indice leggero in ds
+                _, y = ds[i]  # se è costoso, valuta un indice leggero in ds
                 y_i = int(y)
+                labels_seen.add(y_i)
+
                 if len(buckets[y_i]) < shots:
                     buckets[y_i].append(i)
-                    idx.append(i)
-                # se tutte le classi raggiungono k, fermati
-                # (stima del #classi: max label visto + 1; oppure quando nessuna cresce)
-                if all(len(b) >= shots for b in buckets.values()):
+
+                target_labels = label_ids if label_ids else labels_seen
+                if target_labels and all(len(buckets[label]) >= shots for label in target_labels):
                     break
-            # opzionale: ordina per stabilità
-            idx.sort()
+
+            missing = [label for label in (label_ids or labels_seen) if len(buckets[label]) < shots]
+            if missing:
+                warnings.warn(
+                    f"Impossibile raccogliere {shots} esempi per tutte le classi: "
+                    f"mancanti={sorted(missing)} (dataset size={len(ds)})"
+                )
+
+            # appiattisci e ordina per stabilità
+            idx = sorted(i for indices in buckets.values() for i in indices)
 
         subset = Subset(ds, idx)
         small_loader = DataLoader(
@@ -248,6 +260,7 @@ class PlantDataModule:
             def __init__(self, concat_ds, label2idx):
                 self.concat_ds = concat_ds      # ConcatDataset di PlantSamplesDataset
                 self.label2idx = label2idx
+                self.label_ids = set(label2idx.values())
             def __len__(self):
                 return len(self.concat_ds)
             def __getitem__(self, idx):
@@ -285,6 +298,25 @@ class PlantDataModule:
                 extra = Compose(list(extra))
             return Compose([extra, self.preprocess])
         return self.preprocess
+
+    def _collect_label_ids(self, dataset) -> Set[int]:
+        """Raccoglie tutte le label id presenti in un dataset, ricorrendo se necessario."""
+        if dataset is None:
+            return set()
+        if hasattr(dataset, "label_ids"):
+            return set(dataset.label_ids)
+        if hasattr(dataset, "label2idx"):
+            return set(dataset.label2idx.values())
+        if hasattr(dataset, "idx2label"):
+            return set(dataset.idx2label.keys())
+        if isinstance(dataset, Subset):
+            return self._collect_label_ids(dataset.dataset)
+        if isinstance(dataset, ConcatDataset):
+            labels: Set[int] = set()
+            for ds in dataset.datasets:
+                labels.update(self._collect_label_ids(ds))
+            return labels
+        return set()
 
 def _segment_pipeline(
     img_rgb: Image.Image,
