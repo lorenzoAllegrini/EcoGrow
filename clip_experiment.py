@@ -5,6 +5,7 @@ import open_clip
 import torch
 import torch.nn.functional as F
 from roboflow import Roboflow
+import torchvision.transforms as T
 
 from image_segmentator import black_bg_composite, crop_to_alpha_bbox, segment_plant_rgba
 from prompt_learners import PromptLearnerOpenCLIP, TextEncoderOpenCLIP
@@ -112,6 +113,13 @@ def main():
         pad=12,
     )
 
+    train_augmentations = T.Compose(
+        [
+            T.RandomHorizontalFlip(p=0.5),
+            T.RandomRotation(degrees=15),
+        ]
+    )
+
     dm = PlantDataModule(
         dataset_path=dataset.location,
         preprocess=preprocess,
@@ -121,6 +129,7 @@ def main():
         num_workers=4,
         pin_memory=True,
         splits=("train", "valid", "test"),
+        train_transforms=train_augmentations,
     )
 
     # Congela CLIP
