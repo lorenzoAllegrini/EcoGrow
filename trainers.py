@@ -127,6 +127,7 @@ class PromptTuningTrainer:
         for xb, yb in loader:
             xb = xb.to(self.device)
             yb = yb.to(self.device)
+            print(f"y: {yb}")
 
             optimizer.zero_grad()
 
@@ -144,7 +145,7 @@ class PromptTuningTrainer:
 
             logits = (image_features @ text_features.t()) / self.temperature
             loss = F.cross_entropy(logits, yb)
-            print(loss)
+   
             # deve essere True: altrimenti ctx non riceve grad per costruzione
 
             # grad vero su ctx (senza toccare optimizer)
@@ -165,7 +166,7 @@ class PromptTuningTrainer:
 
             # report delta parametri
             #print(delta_report(prompt_learner, before, prefix="ctx/"))
-            print(prompt_learner.ctx)
+    
             total_loss += loss.detach().item() * xb.size(0)
             correct += (logits.argmax(dim=-1) == yb).sum().item()
             total += xb.size(0)

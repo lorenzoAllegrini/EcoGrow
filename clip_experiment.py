@@ -113,12 +113,13 @@ def main():
         pad=12,
     )
 
-    train_augmentations = T.Compose(
-        [
-            T.RandomHorizontalFlip(p=0.5),
-            T.RandomRotation(degrees=15),
-        ]
-    )
+    train_augmentations = T.Compose([
+        T.RandomResizedCrop(224, scale=(0.6, 1.0)),
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomRotation(degrees=15),
+        T.ColorJitter(0.2, 0.2, 0.2, 0.05),
+        # ⚠️ NIENTE ToTensor, NIENTE Normalize qui
+    ])
 
     dm = PlantDataModule(
         dataset_path=dataset.location,
@@ -129,7 +130,7 @@ def main():
         num_workers=4,
         pin_memory=True,
         splits=("train", "valid", "test"),
-        train_transforms=train_augmentations,
+        train_transforms=None,
     )
 
     # Congela CLIP
@@ -145,7 +146,7 @@ def main():
         if "diseases" not in plant_info:
             continue
 
-        train_loader = dm.get_train(plant_name)#, shots=20, per_class=True
+        train_loader = dm.get_train(plant_name, shots=10, per_class=False)
         try:
             val_loader = dm.get_val(plant_name)
         except ValueError:
@@ -181,7 +182,7 @@ def main():
 
         init_ctx_from_prompts(prompt_learner, model, tokenizer, prompts_per_class, alpha_seed=0.3)
 
-        optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=1e-3, weight_decay=0.0)
+        optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=1e-4, weight_decay=0.1)
         history = trainer.fit(
             prompt_learner,
             optimizer,
