@@ -90,9 +90,10 @@ class PromptLearnerOpenCLIP(nn.Module):
 
         # tokenizzazione dei nomi e prompt di riferimento (solo per prefix/suffix)
         prompts_txt = [f"{prompt_prefix} {name}." for name in self.classnames]
-        self.tokenized_prompts = torch.cat([self._tokenizer([p]) for p in prompts_txt], dim=0)  # [C,L]
+        tokenized = torch.cat([self._tokenizer([p]) for p in prompts_txt], dim=0).long()  # [C,L]
+        self.register_buffer("tokenized_prompts", tokenized, persistent=False)
         with torch.no_grad():
-            emb_full = clip_model.token_embedding(self.tokenized_prompts).type(dtype)           # [C,L,D]
+            emb_full = clip_model.token_embedding(self.tokenized_prompts.to(clip_model.token_embedding.weight.device)).type(dtype)           # [C,L,D]
 
         # salva SOS come prefix, e tutto dopo i n_ctx come suffix (inclusi class tokens + EOS)
         self.register_buffer("token_prefix", emb_full[:, :1, :])             # [C,1,D]
@@ -141,4 +142,5 @@ class PromptLearnerOpenCLIP(nn.Module):
         else:
             raise ValueError("class_token_position must be one of {'end','middle','front'}")
 
-        return prompts, self.tokenized_prompts
+        tokenized = self.tokenized_prompts.to(prompts.device)
+        return prompts, tokenized
