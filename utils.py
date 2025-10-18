@@ -1,10 +1,11 @@
 import os
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Union, Sequence, Callable
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
 from functools import partial
 from collections import defaultdict
+from torchvision.transforms import Compose
 
 
 
@@ -42,7 +43,7 @@ class PlantDataModule:
     Costruisce DataLoader per split (train/valid/test), per pianta o combinati.
 
     Esempio:
-        dm = PlantDataModule(dataset_path, preprocess, segment_fn=seg_fn)
+        dm = PlantDataModule(dataset_path, preprocess, segment_fn=seg_fn, train_transforms=train_aug)
         loader = dm.get_train()                  # tutte le piante combinate
         loader_mp = dm.get_train("Money_Plant")  # solo Money_Plant
         idx2label = dm.get_label_map("Money_Plant", split="train")["idx2label"]
@@ -55,7 +56,8 @@ class PlantDataModule:
                  shuffle_train: bool = True,
                  num_workers: int = 4,
                  pin_memory: bool = True,
-                 splits: Tuple[str, ...] = ("train", "valid", "test")):
+                 splits: Tuple[str, ...] = ("train", "valid", "test"),
+                 train_transforms: Optional[Union[Sequence, Callable]] = None):
         self.dataset_path = dataset_path
         self.preprocess = preprocess
         self.segment_fn = segment_fn
@@ -64,6 +66,7 @@ class PlantDataModule:
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.splits = splits
+        self.train_transforms = train_transforms
 
         # Dizionari:
         #  - per split -> { plant_name: [(cond, path), ...] }
@@ -194,7 +197,8 @@ class PlantDataModule:
         # shuffle True solo sul train
         do_shuffle = self.shuffle_train if split == "train" else False
         for plant, items in grouped_index.items():
-            ds = PlantSamplesDataset(items, self.preprocess, segment_fn=self.segment_fn)
+            preprocess = self._get_preprocess_for_split(split)
+            ds = PlantSamplesDataset(items, preprocess, segment_fn=self.segment_fn)
             loader = DataLoader(
                 ds,
                 batch_size=self.batch_size,
@@ -227,7 +231,8 @@ class PlantDataModule:
 
         if not datasets:
             # dataset vuoto per quello split
-            empty = PlantSamplesDataset([], self.preprocess, segment_fn=self.segment_fn)
+            preprocess = self._get_preprocess_for_split(split)
+            empty = PlantSamplesDataset([], preprocess, segment_fn=self.segment_fn)
             loader = DataLoader(empty, batch_size=self.batch_size)
             return loader, {}, {}
 
@@ -272,6 +277,14 @@ class PlantDataModule:
             pin_memory=self.pin_memory,
         )
         return loader, idx2label, label2idx
+
+    def _get_preprocess_for_split(self, split: str):
+        if split == "train" and self.train_transforms is not None:
+            extra = self.train_transforms
+            if isinstance(extra, (list, tuple)):
+                extra = Compose(list(extra))
+            return Compose([extra, self.preprocess])
+        return self.preprocess
 
 def _segment_pipeline(
     img_rgb: Image.Image,
