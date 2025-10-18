@@ -17,6 +17,7 @@ INITIAL_EPOCHS = 5
 FINE_TUNE_EPOCHS = 5
 FINE_TUNE_UNFREEZE_FRACTION = 0.3
 SEED = 42
+MODEL_INPUT_CHANNELS = 3
 
 
 def set_global_seed(seed: int = SEED) -> None:
@@ -89,7 +90,9 @@ def preprocess_image(
     augment: bool = False,
 ) -> Tuple[tf.Tensor, tf.Tensor]:
     image = tf.io.read_file(path)
-    image = tf.io.decode_image(image, channels=3, expand_animations=False)
+    image = tf.io.decode_image(
+        image, channels=MODEL_INPUT_CHANNELS, expand_animations=False
+    )
     image = tf.image.resize(image, IMAGE_SIZE, method=tf.image.ResizeMethod.BILINEAR)
     image = tf.cast(image, tf.float32)
 
@@ -125,15 +128,15 @@ def build_tf_dataset(
 
 
 def build_model(num_classes: int) -> tf.keras.Model:
+    inputs = layers.Input(shape=(*IMAGE_SIZE, MODEL_INPUT_CHANNELS))
     base_model = EfficientNetB0(
         include_top=False,
         weights="imagenet",
-        input_shape=(*IMAGE_SIZE, 3),
+        input_tensor=inputs,
     )
     base_model.trainable = False
 
-    inputs = layers.Input(shape=(*IMAGE_SIZE, 3))
-    x = base_model(inputs, training=False)
+    x = base_model.output
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(0.2)(x)
     outputs = layers.Dense(num_classes, activation="softmax")(x)
