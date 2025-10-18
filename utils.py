@@ -104,6 +104,22 @@ class PlantDataModule:
             self._loaders_per_plant[split] = self._make_loaders_per_plant(grouped_index, split)
             self._combined_loaders[split] = self._make_combined_loader(self._loaders_per_plant[split], split)
 
+    def _get_loader(self, split: str, plant_name: Optional[str]):
+        if split not in self._combined_loaders:
+            raise ValueError(f"Split '{split}' not available in dataset located at {self.dataset_path}")
+
+        if plant_name is None:
+            loader, _, _ = self._combined_loaders[split]
+            return loader
+
+        per_plant = self._loaders_per_plant.get(split, {})
+        if plant_name not in per_plant:
+            available = sorted(per_plant.keys())
+            raise ValueError(f"Plant '{plant_name}' not available for split '{split}'. Available plants: {available}")
+
+        loader, _, _ = per_plant[plant_name]
+        return loader
+
     def _build_grouped_index(self, split: str) -> Dict[str, List[Tuple[str, str]]]:
         split_dir = os.path.join(self.dataset_path, split)
         grouped: Dict[str, List[Tuple[str, str]]] = {}

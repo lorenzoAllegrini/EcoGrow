@@ -1,13 +1,15 @@
-import torch, open_clip, numpy as np
-from PIL import Image
-from roboflow import Roboflow
-from utils import *
 import json
 import os
+
+import open_clip
+import torch
 import torch.nn.functional as F
-from rembg import remove
-import numpy as np
+from roboflow import Roboflow
+
+from image_segmentator import black_bg_composite, crop_to_alpha_bbox, segment_plant_rgba
 from prompt_learners import PromptLearnerOpenCLIP, TextEncoderOpenCLIP
+from trainers import PromptTuningTrainer
+from utils import PlantDataModule, make_segment_fn
  
 
 
@@ -19,11 +21,19 @@ def encode_texts(prompts, tokenizer, model, device):
         text_features = F.normalize(text_features, dim=-1)
     return text_features
 
-def predict_image(img, class_names, all_text_embeds, device, model, preprocess, temperature=0.01, unknown_threshold=0.5, use_seg=True):
-    if use_seg:
-        rgba = segment_plant_rgba(img)
-        rgba = crop_to_alpha_bbox(rgba, pad=12)
-        img = black_bg_composite(rgba)  # oppure lascia rgba e converti in RGB dopo il crop
+def predict_image(
+    img,
+    class_names,
+    all_text_embeds,
+    device,
+    model,
+    preprocess,
+    temperature: float = 0.01,
+    unknown_threshold: float = 0.5,
+    segment_fn=None,
+):
+    if segment_fn is not None:
+        img = segment_fn(img)
     else:
         img = img.convert("RGB")
     img = preprocess(img).unsqueeze(0).to(device)
@@ -87,22 +97,29 @@ def main():
     with open(path, "r", encoding="utf-8") as f:
         classes = json.load(f)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = "ViT-B-32"
     model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained="laion2b_s34b_b79k")
     tokenizer = open_clip.get_tokenizer(model_name)
     model = model.to(device).eval()
     text_encoder = TextEncoderOpenCLIP(model).to(device).eval()
 
-    # Data module: dataloader per pianta
+    segment_fn = make_segment_fn(
+        segment_plant_rgba,
+        crop_to_alpha_bbox,
+        black_bg_composite,
+        pad=12,
+    )
+
     dm = PlantDataModule(
         dataset_path=dataset.location,
         preprocess=preprocess,
+        segment_fn=segment_fn,
         batch_size=16,
         shuffle_train=True,
         num_workers=4,
         pin_memory=True,
-        splits=("train", "valid", "test")
+        splits=("train", "valid", "test"),
     )
 
     # Congela CLIP
@@ -110,71 +127,75 @@ def main():
         p.requires_grad_(False)
 
     epochs = 5
-    temperature = 0.01  # più tipico per CLIP
+    trainer = PromptTuningTrainer(model, text_encoder, device, temperature=0.01)
 
-    for plant_name in classes.keys():
-        # Dataloader e mapping per questa pianta
-        train_loader_img = dm.get_train(plant_name)
-        maps = dm.get_label_map(plant_name, split="train")
-        idx2label = maps["idx2label"]  # es. {0: 'Healthy', 1: 'Bacterial_wilt_disease', ...}
+    results = {}
 
-        # Costruisci classnames nell'ordine del dataloader
+    for plant_name, plant_info in classes.items():
+        if "diseases" not in plant_info:
+            continue
+
+        train_loader = dm.get_train(plant_name)
+        try:
+            val_loader = dm.get_val(plant_name)
+        except ValueError:
+            val_loader = None
+        try:
+            test_loader = dm.get_test(plant_name)
+        except ValueError:
+            test_loader = None
+
+        label_maps = dm.get_label_map(plant_name, split="train")
+        idx2label = label_maps["idx2label"]
         class_order = [idx2label[i] for i in range(len(idx2label))]
-        classnames = [c.replace("_"," ") for c in class_order]
+        classnames = [c.replace("_", " ") for c in class_order]
 
-        # Prompt Learner per questa pianta
-        pl = PromptLearnerOpenCLIP(
+        prompt_learner = PromptLearnerOpenCLIP(
             classnames=classnames,
             clip_model=model,
             n_ctx=16,
             ctx_init=None,
             class_token_position="end",
-            model_name=model_name          # <-- stringa corretta
+            model_name=model_name,
         ).to(device)
 
-        # Inizializza i context token dai prompt JSON (stesso ordine class_order)
-        prompts_per_class = [classes[plant_name]["diseases"][k] for k in class_order]
-        init_ctx_from_prompts(pl, model, tokenizer, prompts_per_class, alpha_seed=0.3)
+        prompts_per_class = []
+        for cls in class_order:
+            if cls not in plant_info["diseases"]:
+                raise KeyError(
+                    f"Missing textual prompts for class '{cls}' in plant '{plant_name}'"
+                )
+            prompts_per_class.append(plant_info["diseases"][cls])
 
-        # Optim solo sul PL
-        opt = torch.optim.AdamW(pl.parameters(), lr=1e-3, weight_decay=0.0)
+        init_ctx_from_prompts(prompt_learner, model, tokenizer, prompts_per_class, alpha_seed=0.3)
 
-        pl.train()
-        for ep in range(1, epochs+1):
-            tot, ok, loss_sum = 0, 0, 0.0
-            for b_idx, (xb, yb) in enumerate(train_loader_img):
-                # Se vuoi limitarti ai primi 5 batch:
-                # if b_idx >= 5: break
+        optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=1e-3, weight_decay=0.0)
 
-                xb, yb = xb.to(device), yb.to(device)
-                with torch.no_grad():
-                    img_feats = F.normalize(model.encode_image(xb), dim=-1)
+        history = trainer.fit(
+            prompt_learner,
+            optimizer,
+            train_loader,
+            epochs=epochs,
+            val_loader=val_loader,
+            grad_clip=1.0,
+            log_fn=lambda msg, plant=plant_name: print(f"[{plant}] {msg}"),
+        )
 
-                # Text feats (senza no_grad: serve il grafo per pl.ctx)
-                prompts_embeds, tok_prompts = pl()
-                text_feats = text_encoder(prompts_embeds, tok_prompts)
-                text_feats = F.normalize(text_feats, dim=-1)
+        plant_results = {"history": history}
+        if test_loader is not None:
+            plant_results["test"] = trainer.evaluate(prompt_learner, test_loader)
 
-                logits = (img_feats @ text_feats.t()) / temperature
-                loss = F.cross_entropy(logits, yb)
+        results[plant_name] = plant_results
 
-                opt.zero_grad(set_to_none=True)
-                loss.backward()
-                opt.step()
+    for plant_name, plant_results in results.items():
+        if "test" in plant_results:
+            test_metrics = plant_results["test"]
+            print(
+                f"[{plant_name}] test loss {test_metrics.loss:.4f} "
+                f"acc {test_metrics.accuracy:.3f}"
+            )
 
-                loss_sum += loss.item() * xb.size(0)
-                ok += (logits.argmax(1) == yb).sum().item()
-                tot += xb.size(0)
-
-            print(f"[{plant_name}] epoch {ep}/{epochs} | loss {loss_sum/tot:.4f} | acc {ok/tot:.3f}")
-
-        # (facoltativo) salva i context token per questa pianta
-        # torch.save(pl.state_dict(), f"{plant_name}_prompt_learner.pt")
-
-
-        """embed_texts = [p for disease_prompts in class_text_embeds[plant_name].values() for p in disease_prompts]
-        pred_class, prob = predict_image(img, list(classes[plant_name]["diseases"].keys()), embed_texts, device, model, preprocess)
-        print(f"predicted: {pred_class}, actual: {condition}, with prob: {prob}")"""
+    return results
 
 if __name__ == "__main__":
     main()
