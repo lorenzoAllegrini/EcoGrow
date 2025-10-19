@@ -1,59 +1,91 @@
 {
-    "Money_Plant": {
-        "diseases": {
-            "Healthy": [
-                "a close-up of a healthy indoor money plant (pothos) leaf under natural light, showing a rich vibrant green color, glossy smooth surface, firm texture, no discoloration or spots, uniform tone across the leaf blade, typical heart-shaped structure, and a clean indoor background",
-                "high-quality macro photo of healthy pothos leaves in an indoor environment, bright and vivid green tones, even color distribution, healthy veins clearly visible, no damage, no curling, no yellowing, no brown edges"
-            ],
-            "Bacterial_wilt_disease": [
-                "a money plant (pothos) leaf infected with bacterial wilt, visibly drooping and soft in texture, with dark water-soaked lesions near the veins and petioles, partially yellowed tissue, moisture accumulation, and overall wilted appearance typical of bacterial infection in indoor conditions",
-                "close-up macro shot of money plant leaf showing bacterial wilt symptoms: wilted and limp leaves, uneven yellow-green color, blackish wet lesions, dark streaks along veins, loss of turgor, dull texture, photographed indoors under soft lighting"
-            ],
-            "Manganese_Toxicity": [
-                "money plant leaf showing manganese toxicity with scattered dark brown to black necrotic spots between veins, interveinal chlorosis creating a patchy yellow-green appearance, rough leaf texture, visible speckling across the surface, and dull coloration typical of micronutrient toxicity",
-                "macro photo of indoor money plant leaf affected by manganese toxicity: uneven color, small black specks scattered throughout, yellowish tissue between veins, fading green tone near the margins, loss of glossiness"
-            ]
+    "species": {
+        "Money_Plant": {
+            "diseases": {
+                "Healthy": [
+                    "a close-up of a healthy indoor money plant (pothos) leaf under natural light, showing a rich vibrant green color, glossy smooth surface, firm texture, no discoloration or spots, uniform tone across the leaf blade, typical heart-shaped structure, and a clean indoor background",
+                    "high-quality macro photo of healthy pothos leaves in an indoor environment, bright and vivid green tones, even color distribution, healthy veins clearly visible, no damage, no curling, no yellowing, no brown edges"
+                ],
+                "Bacterial_wilt_disease": [
+                    "a money plant (pothos) leaf infected with bacterial wilt, visibly drooping and soft in texture, with dark water-soaked lesions near the veins and petioles, partially yellowed tissue, moisture accumulation, and overall wilted appearance typical of bacterial infection in indoor conditions",
+                    "close-up macro shot of money plant leaf showing bacterial wilt symptoms: wilted and limp leaves, uneven yellow-green color, blackish wet lesions, dark streaks along veins, loss of turgor, dull texture, photographed indoors under soft lighting"
+                ],
+                "Manganese_Toxicity": [
+                    "money plant leaf showing manganese toxicity with scattered dark brown to black necrotic spots between veins, interveinal chlorosis creating a patchy yellow-green appearance, rough leaf texture, visible speckling across the surface, and dull coloration typical of micronutrient toxicity",
+                    "macro photo of indoor money plant leaf affected by manganese toxicity: uneven color, small black specks scattered throughout, yellowish tissue between veins, fading green tone near the margins, loss of glossiness"
+                ]
+            }
+        },
+        "Snake_Plant": {
+            "diseases": {
+                "Healthy": [
+                    "a healthy indoor snake plant (Sansevieria) leaf standing fully upright with rigid, turgid structure; clean banded pattern of dark and light green; smooth glossy waxy surface; sharp flat margins; no sunken or dark necrotic lesions; no wrinkles, no drooping, no dull patches; evenly lit indoor background",
+                    "close-up of pristine Sansevieria leaf showing crisp variegation stripes, uniform green tone, intact edges, firm and fleshy feel, reflective sheen; completely free of discrete spots, cracks, or depressed areas"
+                ],
+                "Anthracnose": [
+                    "snake plant leaf with anthracnose: multiple discrete dark brown to nearly black lesions located on the flat blade (mid-leaf), each irregular or oval and clearly delimited; centers appear dry and depressed (sunken) with rough texture, sometimes cracked; thin lighter halo at the boundary; lesions may align along veins; surrounding tissue remains relatively turgid (no global droop)",
+                    "macro close-up of Sansevieria anthracnose showing scattered sunken necrotic patches with sharp edges and a dry corky surface; irregular geometry, some coalescing; distinct color transition from green tissue to dark lesion, occasional pale margin; not limited to tips or edges; no uniform wrinkling of the entire leaf",
+                    "detail photo of fungal anthracnose on snake plant: depressed blackish lesions embedded in the lamina, rough matte centers, slightly raised borders; discrete spots at different positions on the blade; leaf posture mostly preserved (not globally wilted); strong contrast between lesions and healthy green background",
+                    "indoor image of Sansevieria with anthracnose: several localized necrotic spots across the mid-section, sunken and dark with defined outlines; texture appears desiccated in the spot centers; no general loss of turgor across the whole leaf"
+                ],
+                "Leaf_Withering": [
+                    "snake plant showing leaf withering: global loss of turgor causing the leaf to droop and bend from base to tip; longitudinal wrinkling and folding along the blade; overall dull, faded green color; tips may be slightly dry but there are no discrete circular or sunken necrotic lesions on the mid-blade; soft, pliable texture",
+                    "macro shot of withered Sansevieria leaf characterized by generalized limpness and sagging posture, fine surface wrinkles and collapse of firmness; color uniformly muted; margins slightly curled; absence of sharply bounded dark spots or depressed patches typical of fungal lesions",
+                    "indoor snake plant with dehydration/root-stress look: entire leaf appears rubbery and bent, matte finish replacing the usual waxy sheen; widespread wrinkling rather than localized necrotic spots; no black sunken lesions with halos",
+                    "close view of leaf withering pattern: consistent loss of rigidity, blade twists and sags; edges notched from drying but without discrete dark, circular, or depressed fungal marks; symptom distributed across the whole leaf rather than isolated points"
+                ]
+            }
+        },
+        "Spider_Plant": {
+            "diseases": {
+                "Healthy": [
+                    "a healthy indoor spider plant (Chlorophytum comosum) leaf, elongated and arching, bright green blade with a crisp continuous white central stripe, hydrated turgid tips with no browning or dryness, smooth glossy surface, clean intact margins without fraying or discoloration, evenly lit indoor background",
+                    "macro close-up of healthy spider plant foliage showing fresh green tissue and a sharp white variegation line, leaf tips rounded and moist-looking, no brown or tan edges, no necrotic tissue, uniform texture and sheen across the blade",
+                    "well-watered spider plant leaves with supple tips, consistent green color from base to tip, white stripe unbroken, margins smooth and undamaged, no dehydration artifacts, no burnt-paper look, no localized darkening",
+                    "studio-like indoor photo of healthy Chlorophytum leaves: vivid green, glossy finish, continuous variegation, tips intact and flexible, absence of brown tips, absence of crisp or brittle areas, no lesions anywhere on the blade"
+                ],
+                "Fungal_leaf_spot": [
+                    "a spider plant (Chlorophytum) leaf with fungal leaf spot disease, multiple discrete circular to oval brown lesions scattered across the blade (not limited to the tips), faint yellow halos around spots, some centers dry and sunken, irregular distribution and size, surrounding tissue still green",
+                    "macro image of spider plant leaf showing classic fungal leaf spots: round dark brown patches with pale yellow margins, rough dry texture inside lesions, several spots present away from the apex, clear separation from healthy green tissue",
+                    "close-up of Chlorophytum leaf with numerous small circular necrotic spots, some coalescing, visible haloing and sharp spot boundaries, lesions appear on mid-blade region rather than only at the leaf tip, indoor lighting",
+                    "disease pattern consistent with fungal spotting: peppered distribution of brown circular lesions across the lamina, yellow chlorotic rings, tissue collapse inside each spot, not restricted to edges or the extreme tip"
+                ],
+                "Leaf_Tip_Necrosis": [
+                    "spider plant leaf exhibiting tip necrosis: brown, dried, crispy tissue localized at the very apex and along the extreme margins, triangular wedge of necrosis extending inward from the tip, curled brittle edges, strong contrast between dead brown tip and otherwise green healthy base, dehydrated appearance",
+                    "macro close-up of leaf tip necrosis on Chlorophytum: sharply demarcated dark brown to tan apical segment with a burnt-paper texture, margins charred-looking and slightly curled, the rest of the blade remains green and unspotted, white stripe continues behind the necrotic tip",
+                    "indoor spider plant with characteristic brown desiccation at leaf ends, necrosis confined to tips and edges, crisp brittle look, no circular lesions in the mid-blade, healthy green tissue proximal to the necrotic zone, clear boundary line",
+                    "detail photo of spider plant leaf showing localized apical necrosis and edge burn: dry cracked tip, thin brown rim along margins, base tissue firm and hydrated, absence of haloed circular spots, artifact of low humidity or salt burn"
+                ]
+            }
         }
     },
-    "Snake_Plant": {
-        "diseases": {
-            "Healthy": [
-                "a healthy indoor snake plant (Sansevieria) leaf standing fully upright with rigid, turgid structure; clean banded pattern of dark and light green; smooth glossy waxy surface; sharp flat margins; no sunken or dark necrotic lesions; no wrinkles, no drooping, no dull patches; evenly lit indoor background",
-                "close-up of pristine Sansevieria leaf showing crisp variegation stripes, uniform green tone, intact edges, firm and fleshy feel, reflective sheen; completely free of discrete spots, cracks, or depressed areas"
-            ],
-            "Anthracnose": [
-                "snake plant leaf with anthracnose: multiple discrete dark brown to nearly black lesions located on the flat blade (mid-leaf), each irregular or oval and clearly delimited; centers appear dry and depressed (sunken) with rough texture, sometimes cracked; thin lighter halo at the boundary; lesions may align along veins; surrounding tissue remains relatively turgid (no global droop)",
-                "macro close-up of Sansevieria anthracnose showing scattered sunken necrotic patches with sharp edges and a dry corky surface; irregular geometry, some coalescing; distinct color transition from green tissue to dark lesion, occasional pale margin; not limited to tips or edges; no uniform wrinkling of the entire leaf",
-                "detail photo of fungal anthracnose on snake plant: depressed blackish lesions embedded in the lamina, rough matte centers, slightly raised borders; discrete spots at different positions on the blade; leaf posture mostly preserved (not globally wilted); strong contrast between lesions and healthy green background",
-                "indoor image of Sansevieria with anthracnose: several localized necrotic spots across the mid-section, sunken and dark with defined outlines; texture appears desiccated in the spot centers; no general loss of turgor across the whole leaf"
-            ],
-            "Leaf_Withering": [
-                "snake plant showing leaf withering: global loss of turgor causing the leaf to droop and bend from base to tip; longitudinal wrinkling and folding along the blade; overall dull, faded green color; tips may be slightly dry but there are no discrete circular or sunken necrotic lesions on the mid-blade; soft, pliable texture",
-                "macro shot of withered Sansevieria leaf characterized by generalized limpness and sagging posture, fine surface wrinkles and collapse of firmness; color uniformly muted; margins slightly curled; absence of sharply bounded dark spots or depressed patches typical of fungal lesions",
-                "indoor snake plant with dehydration/root-stress look: entire leaf appears rubbery and bent, matte finish replacing the usual waxy sheen; widespread wrinkling rather than localized necrotic spots; no black sunken lesions with halos",
-                "close view of leaf withering pattern: consistent loss of rigidity, blade twists and sags; edges notched from drying but without discrete dark, circular, or depressed fungal marks; symptom distributed across the whole leaf rather than isolated points"
-            ]
-        }
+    "species_to_family": {
+        "Money_Plant": "Araceae",
+        "Snake_Plant": "Asparagaceae",
+        "Spider_Plant": "Asparagaceae"
     },
-    "Spider_Plant": {
-        "diseases": {
-            "Healthy": [
-                "a healthy indoor spider plant (Chlorophytum comosum) leaf, elongated and arching, bright green blade with a crisp continuous white central stripe, hydrated turgid tips with no browning or dryness, smooth glossy surface, clean intact margins without fraying or discoloration, evenly lit indoor background",
-                "macro close-up of healthy spider plant foliage showing fresh green tissue and a sharp white variegation line, leaf tips rounded and moist-looking, no brown or tan edges, no necrotic tissue, uniform texture and sheen across the blade",
-                "well-watered spider plant leaves with supple tips, consistent green color from base to tip, white stripe unbroken, margins smooth and undamaged, no dehydration artifacts, no burnt-paper look, no localized darkening",
-                "studio-like indoor photo of healthy Chlorophytum leaves: vivid green, glossy finish, continuous variegation, tips intact and flexible, absence of brown tips, absence of crisp or brittle areas, no lesions anywhere on the blade"
+    "families": {
+        "Araceae": {
+            "species": [
+                "Money_Plant"
             ],
-            "Fungal_leaf_spot": [
-                "a spider plant (Chlorophytum) leaf with fungal leaf spot disease, multiple discrete circular to oval brown lesions scattered across the blade (not limited to the tips), faint yellow halos around spots, some centers dry and sunken, irregular distribution and size, surrounding tissue still green",
-                "macro image of spider plant leaf showing classic fungal leaf spots: round dark brown patches with pale yellow margins, rough dry texture inside lesions, several spots present away from the apex, clear separation from healthy green tissue",
-                "close-up of Chlorophytum leaf with numerous small circular necrotic spots, some coalescing, visible haloing and sharp spot boundaries, lesions appear on mid-blade region rather than only at the leaf tip, indoor lighting",
-                "disease pattern consistent with fungal spotting: peppered distribution of brown circular lesions across the lamina, yellow chlorotic rings, tissue collapse inside each spot, not restricted to edges or the extreme tip"
+            "diseases": [
+                "Healthy",
+                "Bacterial_wilt_disease",
+                "Manganese_Toxicity"
+            ]
+        },
+        "Asparagaceae": {
+            "species": [
+                "Snake_Plant",
+                "Spider_Plant"
             ],
-            "Leaf_Tip_Necrosis": [
-                "spider plant leaf exhibiting tip necrosis: brown, dried, crispy tissue localized at the very apex and along the extreme margins, triangular wedge of necrosis extending inward from the tip, curled brittle edges, strong contrast between dead brown tip and otherwise green healthy base, dehydrated appearance",
-                "macro close-up of leaf tip necrosis on Chlorophytum: sharply demarcated dark brown to tan apical segment with a burnt-paper texture, margins charred-looking and slightly curled, the rest of the blade remains green and unspotted, white stripe continues behind the necrotic tip",
-                "indoor spider plant with characteristic brown desiccation at leaf ends, necrosis confined to tips and edges, crisp brittle look, no circular lesions in the mid-blade, healthy green tissue proximal to the necrotic zone, clear boundary line",
-                "detail photo of spider plant leaf showing localized apical necrosis and edge burn: dry cracked tip, thin brown rim along margins, base tissue firm and hydrated, absence of haloed circular spots, artifact of low humidity or salt burn"
+            "diseases": [
+                "Healthy",
+                "Anthracnose",
+                "Leaf_Withering",
+                "Fungal_leaf_spot",
+                "Leaf_Tip_Necrosis"
             ]
         }
     }
