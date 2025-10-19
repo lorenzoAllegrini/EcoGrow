@@ -1,3 +1,4 @@
+import json
 import os
 from typing import List, Tuple, Dict, Optional, Union, Sequence, Callable, Set
 from PIL import Image
@@ -58,7 +59,9 @@ class PlantDataModule:
                  num_workers: int = 4,
                  pin_memory: bool = True,
                  splits: Tuple[str, ...] = ("train", "valid", "test"),
-                 train_transforms: Optional[Union[Sequence, Callable]] = None):
+                 train_transforms: Optional[Union[Sequence, Callable]] = None,
+                 species_to_family: Optional[Dict[str, str]] = None,
+                 prompts_config_path: Optional[str] = None):
         self.dataset_path = dataset_path
         self.preprocess = preprocess
         self.segment_fn = segment_fn
@@ -68,35 +71,50 @@ class PlantDataModule:
         self.pin_memory = pin_memory
         self.splits = splits
         self.train_transforms = train_transforms
+        self.prompts_config_path = prompts_config_path
+        self.species_to_family = species_to_family if species_to_family is not None else self._load_species_family_mapping(prompts_config_path)
 
         # Dizionari:
         #  - per split -> { plant_name: [(cond, path), ...] }
         #  - per split -> { plant_name: (loader, idx2label, label2idx) }
-        self._grouped_index: Dict[str, Dict[str, List[Tuple[str, str]]]] = {}
+        self._grouped_index: Dict[str, Dict[str, Dict[str, List[Tuple[str, str]]]]] = {}
         self._loaders_per_plant: Dict[str, Dict[str, Tuple[DataLoader, Dict[int, str], Dict[str, int]]]] = {}
+        self._loaders_per_family: Dict[str, Dict[str, Tuple[DataLoader, Dict[int, str], Dict[str, int]]]] = {}
         self._combined_loaders: Dict[str, Tuple[DataLoader, Dict[int, str], Dict[str, int]]] = {}
 
         # Costruisci tutto
         self._build_all()
 
     # ---------- API pubblica ----------
-    def get_train(self, plant_name: Optional[str] = None, shots: Optional[int] = None, per_class: Optional[bool] = True) -> DataLoader:
-        return self._get_loader(split="train", plant_name=plant_name, shots=shots, per_class=per_class)
+    def get_train(self, plant_name: Optional[str] = None, shots: Optional[int] = None, per_class: Optional[bool] = True, family_name: Optional[str] = None) -> DataLoader:
+        return self._get_loader(split="train", plant_name=plant_name, shots=shots, per_class=per_class, family_name=family_name)
 
-    def get_val(self, plant_name: Optional[str] = None, shots: Optional[int] = None) -> DataLoader:
+    def get_val(self, plant_name: Optional[str] = None, shots: Optional[int] = None, family_name: Optional[str] = None) -> DataLoader:
         split = "valid" if "valid" in self._grouped_index else "val" if "val" in self._grouped_index else "test"
-        return self._get_loader(split=split, plant_name=plant_name, shots=shots)
+        return self._get_loader(split=split, plant_name=plant_name, shots=shots, family_name=family_name)
 
-    def get_test(self, plant_name: Optional[str] = None) -> DataLoader:
-        return self._get_loader(split="test", plant_name=plant_name)
+    def get_test(self, plant_name: Optional[str] = None, family_name: Optional[str] = None) -> DataLoader:
+        return self._get_loader(split="test", plant_name=plant_name, family_name=family_name)
 
-    def get_label_map(self, plant_name: Optional[str], split: str = "train") -> Dict[str, Dict]:
+    def get_label_map(self, plant_name: Optional[str], split: str = "train", family_name: Optional[str] = None) -> Dict[str, Dict]:
         """
         Ritorna i mapping per una pianta o per il combinato dello split.
         """
+        if plant_name is not None and family_name is not None:
+            raise ValueError("Specificare solo uno tra 'plant_name' e 'family_name'.")
         if plant_name is None:
-            _, idx2label, label2idx = self._combined_loaders[split]
-            return {"idx2label": idx2label, "label2idx": label2idx}
+            if family_name is None:
+                _, idx2label, label2idx = self._combined_loaders[split]
+                return {"idx2label": idx2label, "label2idx": label2idx}
+            else:
+                per_family = self._loaders_per_family.get(split, {})
+                if family_name not in per_family:
+                    available = sorted(per_family.keys())
+                    raise ValueError(
+                        f"Family '{family_name}' not available for split '{split}'. Available families: {available}"
+                    )
+                _, idx2label, label2idx = per_family[family_name]
+                return {"idx2label": idx2label, "label2idx": label2idx}
         else:
             loader, idx2label, label2idx = self._loaders_per_plant[split][plant_name]
             return {"idx2label": idx2label, "label2idx": label2idx}
@@ -108,7 +126,10 @@ class PlantDataModule:
                 continue
             grouped_index = self._build_grouped_index(split)
             self._grouped_index[split] = grouped_index
-            self._loaders_per_plant[split] = self._make_loaders_per_plant(grouped_index, split)
+            plants_grouped = grouped_index.get("plants", {})
+            families_grouped = grouped_index.get("families", {})
+            self._loaders_per_plant[split] = self._make_loaders_for_groups(plants_grouped, split)
+            self._loaders_per_family[split] = self._make_loaders_for_groups(families_grouped, split)
             self._combined_loaders[split] = self._make_combined_loader(self._loaders_per_plant[split], split)
 
     def _make_subset_loader(self, loader, shots: int, per_class: bool = True):
@@ -166,12 +187,23 @@ class PlantDataModule:
         )
         return small_loader
 
-    def _get_loader(self, split: str, plant_name: Optional[str], shots: Optional[int] = None, per_class: bool = True):
+    def _get_loader(self, split: str, plant_name: Optional[str], shots: Optional[int] = None, per_class: bool = True, family_name: Optional[str] = None):
         if split not in self._combined_loaders:
             raise ValueError(f"Split '{split}' not available in dataset located at {self.dataset_path}")
 
-        if plant_name is None:
+        if plant_name is not None and family_name is not None:
+            raise ValueError("Specificare solo uno tra 'plant_name' e 'family_name'.")
+
+        if plant_name is None and family_name is None:
             loader, _, _ = self._combined_loaders[split]
+            return self._make_subset_loader(loader, shots, per_class)
+
+        if family_name is not None:
+            per_family = self._loaders_per_family.get(split, {})
+            if family_name not in per_family:
+                available = sorted(per_family.keys())
+                raise ValueError(f"Family '{family_name}' not available for split '{split}'. Available families: {available}")
+            loader, _, _ = per_family[family_name]
             return self._make_subset_loader(loader, shots, per_class)
 
         per_plant = self._loaders_per_plant.get(split, {})
@@ -182,9 +214,11 @@ class PlantDataModule:
         loader, _, _ = per_plant[plant_name]
         return self._make_subset_loader(loader, shots, per_class)
 
-    def _build_grouped_index(self, split: str) -> Dict[str, List[Tuple[str, str]]]:
+    def _build_grouped_index(self, split: str) -> Dict[str, Dict[str, List[Tuple[str, str]]]]:
         split_dir = os.path.join(self.dataset_path, split)
-        grouped: Dict[str, List[Tuple[str, str]]] = {}
+        grouped_plants: Dict[str, List[Tuple[str, str]]] = {}
+        grouped_families: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+        missing_family_warning: Set[str] = set()
         for folder in os.listdir(split_dir):
             folder_path = os.path.join(split_dir, folder)
             if not os.path.isdir(folder_path):
@@ -201,10 +235,51 @@ class PlantDataModule:
                 if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
                     continue
                 img_path = os.path.join(folder_path, fname)
-                grouped.setdefault(plant_name, []).append((condition, img_path))
-        return grouped
+                grouped_plants.setdefault(plant_name, []).append((condition, img_path))
+                family_name = self.species_to_family.get(plant_name)
+                if family_name is None:
+                    if plant_name not in missing_family_warning:
+                        warnings.warn(
+                            f"Missing family mapping for species '{plant_name}'. Using species name as fallback family.",
+                            RuntimeWarning,
+                        )
+                        missing_family_warning.add(plant_name)
+                    family_name = plant_name
+                grouped_families[family_name].append((condition, img_path))
+        return {
+            "plants": grouped_plants,
+            "families": {fam: items for fam, items in grouped_families.items()}
+        }
 
-    def _make_loaders_per_plant(self, grouped_index: Dict[str, List[Tuple[str, str]]], split: str):
+    @staticmethod
+    def _load_species_family_mapping(config_path: Optional[str]) -> Dict[str, str]:
+        path = config_path or os.path.abspath("prompts.json")
+        if not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.warn(f"Unable to load species→family mapping from '{path}': {exc}")
+            return {}
+        mapping = data.get("species_to_family", {})
+        if not isinstance(mapping, dict):
+            warnings.warn(
+                f"Invalid 'species_to_family' structure in '{path}'. Expected an object, received {type(mapping).__name__}."
+            )
+            return {}
+        cleaned: Dict[str, str] = {}
+        for species, family in mapping.items():
+            if not isinstance(species, str) or not isinstance(family, str):
+                warnings.warn(
+                    "Skipping species→family entry with non-string keys or values: "
+                    f"{species!r} -> {family!r}"
+                )
+                continue
+            cleaned[species] = family
+        return cleaned
+
+    def _make_loaders_for_groups(self, grouped_index: Dict[str, List[Tuple[str, str]]], split: str):
         out = {}
         # shuffle True solo sul train
         do_shuffle = self.shuffle_train if split == "train" else False
