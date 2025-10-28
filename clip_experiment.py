@@ -1,6 +1,8 @@
 import json
 import os
 from collections import defaultdict
+from pathlib import Path
+from typing import Dict, Iterable
 
 import open_clip
 import torch
@@ -12,7 +14,7 @@ from image_segmentator import black_bg_composite, crop_to_alpha_bbox, segment_pl
 from prompt_learners import PromptLearnerOpenCLIP, TextEncoderOpenCLIP
 from trainers import PromptTuningTrainer
 from utils import PlantDataModule, make_segment_fn
- 
+
 
 
 def encode_texts(prompts, tokenizer, model, device):
@@ -54,6 +56,79 @@ def predict_image(
     return pred_class, max_prob.item()
 
 
+def resolve_dataset_path() -> str:
+    """
+    Resolves the dataset location from environment variables or downloads it on demand.
+    Priority:
+      1. ECOGROW_DATASET_PATH if set and exists.
+      2. Local folder 'Indoor-Plant-disease-dataset-1'.
+      3. Roboflow download using environment-driven credentials.
+    """
+    path_hint = os.environ.get("ECOGROW_DATASET_PATH")
+    if path_hint:
+        dataset_path = os.path.abspath(path_hint)
+        if not os.path.isdir(dataset_path):
+            raise FileNotFoundError(
+                f"ECOGROW_DATASET_PATH points to '{dataset_path}', but the directory does not exist."
+            )
+        return dataset_path
+
+    local_default = os.path.abspath("Indoor-Plant-disease-dataset-1")
+    if os.path.isdir(local_default):
+        return local_default
+
+    api_key = os.environ.get("ROBOFLOW_API_KEY")
+    if not api_key:
+        raise EnvironmentError(
+            "Dataset not found locally. Set ROBOFLOW_API_KEY or ECOGROW_DATASET_PATH to proceed."
+        )
+
+    workspace = os.environ.get("ROBOFLOW_WORKSPACE", "lorenzo-dgkm4")
+    project_slug = os.environ.get("ROBOFLOW_PROJECT", "indoor-plant-disease-dataset-odg74-ystag")
+    version = int(os.environ.get("ROBOFLOW_VERSION", "1"))
+    download_format = os.environ.get("ROBOFLOW_DOWNLOAD_FORMAT", "folder")
+
+    rf = Roboflow(api_key=api_key)
+    project = rf.workspace(workspace).project(project_slug)
+    dataset = project.version(version).download(download_format)
+    return dataset.location
+
+
+def resolve_embeddings_dir() -> Path | None:
+    """
+    Returns the output directory for embeddings if ECOGROW_EMBEDDINGS_DIR is set.
+    """
+    target = os.environ.get("ECOGROW_EMBEDDINGS_DIR")
+    if not target:
+        return None
+    path = Path(target).expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def export_family_embeddings(
+    out_path: Path,
+    family_name: str,
+    class_order: Iterable[str],
+    prompt_learner: PromptLearnerOpenCLIP,
+    text_encoder: TextEncoderOpenCLIP,
+    temperature: float,
+) -> Dict:
+    with torch.no_grad():
+        prompts_embeds, tokenized_prompts = prompt_learner()
+        text_features = text_encoder(prompts_embeds, tokenized_prompts)
+        text_features = F.normalize(text_features, dim=-1)
+
+    payload = {
+        "family": family_name,
+        "classes": list(class_order),
+        "text_features": text_features.cpu(),
+        "temperature": float(temperature),
+    }
+    torch.save(payload, out_path)
+    return payload
+
+
 def init_ctx_from_prompts(prompt_learner, clip_model, tokenizer, prompts_per_class, alpha_seed=0.0, seed_text="a photo of a"):
     device = next(clip_model.parameters()).device
     dtype  = next(clip_model.parameters()).dtype
@@ -91,9 +166,8 @@ def init_ctx_from_prompts(prompt_learner, clip_model, tokenizer, prompts_per_cla
 
 
 def main():
-    rf = Roboflow(api_key="B5qYFzGDrNSzMkOluc7f")
-    project = rf.workspace("lorenzo-dgkm4").project("indoor-plant-disease-dataset-odg74-ystag")
-    dataset = project.version(1).download("folder") 
+    dataset_path = resolve_dataset_path()
+    embeddings_dir = resolve_embeddings_dir()
     path = os.path.abspath("prompts.json")
 
     with open(path, "r", encoding="utf-8") as f:
@@ -118,7 +192,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = "ViT-B-32"
-    model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained="laion2b_s34b_b79k")
+    pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
+    model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained_tag)
     tokenizer = open_clip.get_tokenizer(model_name)
     model.float()
     model = model.to(device).eval()
@@ -140,15 +215,15 @@ def main():
     ])
 
     dm = PlantDataModule(
-        dataset_path=dataset.location,
+        dataset_path=dataset_path,
         preprocess=preprocess,
         segment_fn=segment_fn,
-        batch_size=1,
+        batch_size=16,
         shuffle_train=True,
         num_workers=4,
         pin_memory=True,
         splits=("train", "valid", "test"),
-        train_transforms=None,
+        train_transforms=train_augmentations,
         species_to_family=species_to_family,
         prompts_config_path=path,
     )
@@ -157,17 +232,18 @@ def main():
     for p in model.parameters():
         p.requires_grad_(False)
 
-    epochs = 2
+    epochs = 10
     trainer = PromptTuningTrainer(model, text_encoder, device, temperature=0.07)
     
     results = {}
+    index_payload = {"model_name": model_name, "pretrained": pretrained_tag, "families": {}}
 
     for family_name, family_info in family_definitions.items():
         family_diseases = family_info.get("diseases", [])
         if not family_diseases:
             continue
 
-        train_loader = dm.get_train(family_name=family_name, shots=10, per_class=False)
+        train_loader = dm.get_train(family_name=family_name)
         try:
             val_loader = dm.get_val(family_name=family_name)
         except ValueError:
@@ -214,7 +290,7 @@ def main():
 
         init_ctx_from_prompts(prompt_learner, model, tokenizer, prompts_per_class, alpha_seed=0.3)
 
-        optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=1e-4, weight_decay=0.1)
+        optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=5e-3, weight_decay=0.0)
         history = trainer.fit(
             prompt_learner,
             optimizer,
@@ -229,6 +305,21 @@ def main():
         if test_loader is not None:
             plant_results["test"] = trainer.evaluate(prompt_learner, test_loader)
 
+        if embeddings_dir is not None:
+            family_file = embeddings_dir / f"{family_name}.pt"
+            export_family_embeddings(
+                family_file,
+                family_name,
+                class_order,
+                prompt_learner,
+                text_encoder,
+                temperature=trainer.temperature,
+            )
+            index_payload["families"][family_name] = {
+                "file": family_file.name,
+                "classes": class_order,
+            }
+
         results[family_name] = plant_results
 
     for family_name, plant_results in results.items():
@@ -238,6 +329,11 @@ def main():
                 f"[{family_name}] test loss {test_metrics.loss:.4f} "
                 f"acc {test_metrics.accuracy:.3f}"
             )
+
+    if embeddings_dir is not None and index_payload["families"]:
+        index_path = embeddings_dir / "index.json"
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(index_payload, f, indent=2)
 
     return results
 
