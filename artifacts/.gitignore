@@ -1,0 +1,3 @@
+# Generated embedding files. Keep directory in repo while ignoring payloads.
+*
+!.gitignore

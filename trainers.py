@@ -15,44 +15,6 @@ class EpochMetrics:
     accuracy: float
 
 
-
-def snapshot_params(model):
-    # copia leggera dei tensori dei pesi per calcolare le differenze dopo lo step
-    return {
-        n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad
-    }
-
-
-def grad_report(model, prefix=""):
-    lines = []
-    for n, p in model.named_parameters():
-        if not p.requires_grad:
-            lines.append(f"[FROZEN] {prefix}{n}")
-            continue
-        g = p.grad
-        if g is None:
-            lines.append(f"[NO-GRAD] {prefix}{n}")
-        else:
-            lines.append(f"[GRAD]    {prefix}{n}: ||g||={g.data.norm().item():.4e}")
-    return "\n".join(lines)
-
-
-def delta_report(model, before, prefix=""):
-    # mostra quanto è cambiato ogni parametro dopo optimizer.step()
-    lines = []
-    with torch.no_grad():
-        for n, p in model.named_parameters():
-            if n not in before:
-                lines.append(f"[NEW]  {prefix}{n} (aggiunto dopo lo snapshot)")
-                continue
-            if not p.requires_grad:
-                lines.append(f"[FROZEN]{prefix}{n}")
-                continue
-            delta = (p - before[n]).norm().item()
-            lines.append(f"[Δ]     {prefix}{n}: ||Δ||={delta:.4e}")
-    return "\n".join(lines)
-
-
 class PromptTuningTrainer:
     def __init__(
         self,
@@ -122,12 +84,9 @@ class PromptTuningTrainer:
         correct = 0
         total = 0
 
-        # opzionale: stampa quali parametri sono addestrabili
-        
         for xb, yb in loader:
             xb = xb.to(self.device)
             yb = yb.to(self.device)
-            print(f"y: {yb}")
 
             optimizer.zero_grad()
 
@@ -136,8 +95,6 @@ class PromptTuningTrainer:
                 image_features = self.clip_model.encode_image(xb)
             image_features = F.normalize(image_features, dim=-1)
 
-            # snapshot prima dell'update (per i tuoi report)
-            before = snapshot_params(prompt_learner)
             # FORWARD testo (senza autocast)
             prompts_embeds, tokenized_prompts = prompt_learner()
             text_features = self.text_encoder(prompts_embeds, tokenized_prompts)
@@ -145,11 +102,6 @@ class PromptTuningTrainer:
 
             logits = (image_features @ text_features.t()) / self.temperature
             loss = F.cross_entropy(logits, yb)
-   
-            # deve essere True: altrimenti ctx non riceve grad per costruzione
-
-            # grad vero su ctx (senza toccare optimizer)
-            g = torch.autograd.grad(loss, prompt_learner.ctx, retain_graph=True, allow_unused=True)[0]
 
             # BACKWARD classico
             loss.backward()
@@ -158,14 +110,8 @@ class PromptTuningTrainer:
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(prompt_learner.parameters(), grad_clip)
 
-            # report gradienti (ora sono reali, non scalati)
-            #print(grad_report(prompt_learner, prefix="ctx/"))
-
             # STEP ottimizzatore
             optimizer.step()
-
-            # report delta parametri
-            #print(delta_report(prompt_learner, before, prefix="ctx/"))
     
             total_loss += loss.detach().item() * xb.size(0)
             correct += (logits.argmax(dim=-1) == yb).sum().item()
