@@ -57,13 +57,6 @@ def predict_image(
 
 
 def resolve_dataset_path() -> str:
-    """
-    Resolves the dataset location from environment variables or downloads it on demand.
-    Priority:
-      1. ECOGROW_DATASET_PATH if set and exists.
-      2. Local folder 'Indoor-Plant-disease-dataset-1'.
-      3. Roboflow download using environment-driven credentials.
-    """
     path_hint = os.environ.get("ECOGROW_DATASET_PATH")
     if path_hint:
         dataset_path = os.path.abspath(path_hint)
@@ -211,7 +204,6 @@ def main():
         T.RandomHorizontalFlip(p=0.5),
         T.RandomRotation(degrees=15),
         T.ColorJitter(0.2, 0.2, 0.2, 0.05),
-        # ⚠️ NIENTE ToTensor, NIENTE Normalize qui
     ])
 
     dm = PlantDataModule(
@@ -228,7 +220,6 @@ def main():
         prompts_config_path=path,
     )
 
-    # Congela CLIP
     for p in model.parameters():
         p.requires_grad_(False)
 
