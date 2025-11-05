@@ -1,0 +1,38 @@
+{
+    "Araceae": {
+        "Healthy": [
+            "healthy Araceae leaf, vibrant emerald green, glossy heart-shaped blade, firm turgid texture, no spots or discoloration",
+            "indoor close-up of a well-watered pothos leaf under soft natural light, uniform rich green tone, smooth reflective surface, clean neutral background"
+        ],
+        "Bacterial_wilt_disease": [
+            "Araceae leaf with bacterial wilt, drooping limp tissue, water-soaked dark lesions along veins, uneven yellowing",
+            "macro indoor view of a wilted pothos leaf showing limp texture, dark wet streaks near the petiole, partially yellow chlorotic areas, moisture beading on the surface"
+        ],
+        "Manganese_Toxicity": [
+            "Araceae leaf affected by manganese toxicity, scattered black necrotic specks, patchy interveinal chlorosis, dull texture",
+            "close-up of pothos foliage displaying micronutrient toxicity: yellow-green blotches between veins, numerous dark pin-point spots, fading gloss, indoor lighting"
+        ]
+    },
+    "Asparagaceae": {
+        "Healthy": [
+            "healthy snake plant leaf, upright rigid blade, crisp dark and light green banding, glossy waxy surface",
+            "studio-like indoor view of pristine sansevieria leaf, turgid posture, sharp variegation stripes, clean intact margins, reflective sheen"
+        ],
+        "Anthracnose": [
+            "snake plant leaf with anthracnose lesions, discrete dark sunken patches with pale halos across the mid-blade",
+            "macro detail of sansevieria anthracnose showing rough depressed brown-black spots, defined borders, dry centers, scattered along the flat blade while the leaf remains rigid"
+        ],
+        "Leaf_Withering": [
+            "snake plant leaf undergoing withering, overall drooping blade, longitudinal wrinkles, muted dull green color",
+            "indoor view of dehydrated sansevieria leaf bending from the base, supple rubbery texture, matte finish, fine surface folds, no discrete fungal lesions"
+        ],
+        "Fungal_leaf_spot": [
+            "spider plant leaf with fungal spots, multiple brown circular lesions with yellow halos scattered along the blade",
+            "macro image of chlorophytum showing peppered dark necrotic spots away from the tip, rough dry centers, surrounding tissue still green under indoor lighting"
+        ],
+        "Leaf_Tip_Necrosis": [
+            "spider plant leaf with tip necrosis, brown desiccated apex and edges, crisp brittle texture contrasting green base",
+            "detail of chlorophytum leaf indoors, sharp boundary between burnt tan tip and healthy green blade, curled dry margins, no mid-blade spotting"
+        ]
+    }
+}
