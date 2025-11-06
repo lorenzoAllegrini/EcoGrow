@@ -1,16 +1,24 @@
 import argparse
+import csv
 import json
 import os
-from pathlib import Path
+import sys
 from dataclasses import dataclass
-from typing import Dict, Iterable, Namespace, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
-import torchvision.transforms as T
-from roboflow import Roboflow
-from torch.utils.data import DataLoader
 
+# Avoid numba cache issues when running via Poetry.
+os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
+
+# Ensure project root is on PYTHONPATH when running as a script.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
 from ecogrow.models.open_clip_wrapper import OpenClipWrapper, TextEncoderOpenCLIP
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
@@ -19,35 +27,8 @@ from ecogrow.preprocessing.image_segmentator import (
 )
 from ecogrow.training.prompt_learners import PromptLearnerOpenCLIP
 from ecogrow.training.trainers import PromptTuningTrainer
-from ecogrow.data.plant_data import (
-    DEFAULT_SPECIES_TO_FAMILY,
-    PlantData,
-    make_segment_fn,
-)
-from experiments.utils import build_prompt_learner
-
-
-def export_family_embeddings(
-    out_path: Path,
-    family_name: str,
-    class_order: Iterable[str],
-    prompt_learner: PromptLearnerOpenCLIP,
-    text_encoder: TextEncoderOpenCLIP,
-    temperature: float,
-) -> Dict:
-    with torch.no_grad():
-        prompts_embeds, tokenized_prompts = prompt_learner()
-        text_features = text_encoder(prompts_embeds, tokenized_prompts)
-        text_features = F.normalize(text_features, dim=-1)
-
-    payload = {
-        "family": family_name,
-        "classes": list(class_order),
-        "text_features": text_features.cpu(),
-        "temperature": float(temperature),
-    }
-    torch.save(payload, out_path)
-    return payload
+from ecogrow.data.plant_data import PlantData, make_segment_fn
+from experiments.utils import compute_init_ctx, export_family_embeddings
 
 
 @dataclass(frozen=True)
@@ -55,13 +36,20 @@ class Config:
     dataset_path: Path
     embeddings_dir: Optional[Path]
     prompts_config: Path
+    run_id: str
+    exp_dir: Path
+    epochs: int
+    batch_size: int
+    temperature: float
+    perc_eval: float
+    lr: float
 
 
 def _parse_args() -> Config:
-    parser = argparse.ArgumentParser(description="EcoGrow CLIP prompt tuning experiment")
+    parser = argparse.ArgumentParser(description="EcoGrow CLIP benchmark experiment")
     parser.add_argument(
         "--dataset-path",
-        default="Indoor-Plant-disease-dataset-1",
+        default="datasets",
         help="Percorso alla directory del dataset (es. data/Indoor-Plant-disease-dataset-1)",
     )
     parser.add_argument(
@@ -71,10 +59,50 @@ def _parse_args() -> Config:
     )
     parser.add_argument(
         "--prompts-config",
-        default="prompts.json",
+        default="experiments/prompts.json",
         help="File JSON con la configurazione dei prompt",
     )
-    args: Namespace = parser.parse_args()
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Identificativo della run; se non specificato viene derivato dal nome del file di prompt.",
+    )
+    parser.add_argument(
+        "--exp-dir",
+        default="experiments",
+        help="Directory principale dove salvare i risultati del benchmark.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=10,
+        help="Numero di epoche di fine-tuning per ciascuna famiglia.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Batch size utilizzata durante il fine-tuning.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.07,
+        help="Temperatura da usare durante la similarità immagine-testo.",
+    )
+    parser.add_argument(
+        "--perc-eval",
+        type=float,
+        default=0.2,
+        help="Frazione del training da usare come validation (0 disabilita lo split).",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=5e-3,
+        help="Learning rate del prompt tuner (AdamW).",
+    )
+    args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
     if not dataset_path.is_dir():
@@ -89,26 +117,46 @@ def _parse_args() -> Config:
     if not prompts_path.is_file():
         raise FileNotFoundError(f"Prompts config '{prompts_path}' non esiste.")
 
+    exp_dir = Path(args.exp_dir).expanduser().resolve()
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.run_id:
+        run_id = args.run_id
+    else:
+        run_id = f"clip_{prompts_path.stem}"
+
     return Config(
         dataset_path=dataset_path,
         embeddings_dir=embeddings_dir,
         prompts_config=prompts_path,
+        run_id=run_id,
+        exp_dir=exp_dir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        temperature=args.temperature,
+        perc_eval=max(0.0, float(args.perc_eval)),
+        lr=args.lr,
     )
 
 
-def main():
+def main() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
-    dataset_path_str = str(config.dataset_path)
-    embeddings_dir = config.embeddings_dir
-    prompts_path = config.prompts_config
 
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
     model_name = "ViT-B-32"
+    
     clip_wrapper = OpenClipWrapper(
         model_name=model_name,
         pretrained_tag=os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k"),
         device=device_str,
+    )
+    clip_wrapper.freeze_backbone()
+
+    benchmark = EcogrowBenchmark(
+        run_id=config.run_id,
+        exp_dir=str(config.exp_dir),
+        data_root=str(config.dataset_path),
     )
 
     segment_fn = make_segment_fn(
@@ -117,206 +165,140 @@ def main():
         black_bg_composite,
         pad=12,
     )
-
-    train_augmentations = T.Compose([
-        T.RandomResizedCrop(224, scale=(0.6, 1.0)),
-        T.RandomHorizontalFlip(p=0.5),
-        T.RandomRotation(degrees=15),
-        T.ColorJitter(0.2, 0.2, 0.2, 0.05),
-    ])
-
-    with open(prompts_path, "r", encoding="utf-8") as f:
+    with open(config.prompts_config, "r", encoding="utf-8") as f:
         prompt_config = json.load(f)
 
-    species_prompts = prompt_config.get("species", {})
-    species_to_family = prompt_config.get("species_to_family", DEFAULT_SPECIES_TO_FAMILY)
-    family_definitions = prompt_config.get("families", {})
 
-    if not family_definitions:
-        fallback: Dict[str, Dict[str, Iterable[str]]] = {}
-        for species_name, spec_data in species_prompts.items():
-            fam_name = species_to_family.get(species_name, species_name)
-            entry = fallback.setdefault(fam_name, {"species": set(), "diseases": set()})
-            entry["species"].add(species_name)
-            entry["diseases"].update(spec_data.get("diseases", {}).keys())
-        family_definitions = {
-            fam: {
-                "species": sorted(entry["species"]),
-                "diseases": sorted(entry["diseases"]),
-            }
-            for fam, entry in fallback.items()
-        }
+    family_results: Dict[str, Dict[str, object]] = {}
+    summary_rows: List[Dict[str, object]] = []
 
-    clip_wrapper.freeze_backbone()
-    epochs = 10
-    results: Dict[str, Dict[str, object]] = {}
-    index_payload = {
-        "families": {},
-        "metadata": {"model": model_name, "pretrained": clip_wrapper.pretrained_tag},
-    }
+    num_families = len(prompt_config)
+    for i, (family_name, family_cfg) in enumerate(prompt_config.items(), start=1):
+        print(f"[{i}/{num_families}] Family: {family_name}")
 
-    train_transform = T.Compose([train_augmentations, clip_wrapper.preprocess])
-    eval_transform = clip_wrapper.preprocess
+        class_prompts = [prompts[1] for _, prompts in family_cfg.items()]
+        classnames = [disease for disease in family_cfg.keys()]
 
-    def build_dataset(
-        family: str,
-        split_candidates: Sequence[str],
-        transform,
-        *,
-        shuffle: bool,
-    ) -> Tuple[Optional[PlantData], Optional[DataLoader]]:
-        for split_name in split_candidates:
-            try:
-                dataset = PlantData(
-                    dataset_root=dataset_path_str,
-                    family=family,
-                    split=split_name,
-                    transform=transform,
-                    segment_fn=segment_fn,
-                )
-                loader = dataset.make_dataloader(
-                    batch_size=16,
-                    shuffle=shuffle,
-                    num_workers=4,
-                    pin_memory=True,
-                )
-                return dataset, loader
-            except FileNotFoundError:
-                continue
-        return None, None
-
-    for family_name, family_info in family_definitions.items():
-        train_dataset, train_loader = build_dataset(
-            family_name,
-            ("train",),
-            train_transform,
-            shuffle=True,
-        )
-        if train_dataset is None or train_loader is None:
-            print(f"[WARN] Split 'train' non trovato per la famiglia '{family_name}', salto.")
-            continue
-
-        val_dataset, val_loader = build_dataset(
-            family_name,
-            ("valid", "val", "validation"),
-            eval_transform,
-            shuffle=False,
-        )
-        test_dataset, test_loader = build_dataset(
-            family_name,
-            ("test",),
-            eval_transform,
-            shuffle=False,
-        )
-
-        class_order = train_dataset.classes
-        family_diseases = set(family_info.get("diseases", []))
-        diseases_lower = {d.lower(): d for d in family_diseases}
-        undefined_conditions = [
-            cls for cls in class_order if cls.lower() not in diseases_lower
-        ]
-        if undefined_conditions:
-            raise KeyError(
-                f"Family '{family_name}' is missing definitions for diseases: {undefined_conditions}"
-            )
-        prompts_per_class = []
-        mapped_species = [species for species, fam in species_to_family.items() if fam == family_name]
-        family_species = list(dict.fromkeys(family_info.get("species", []) + mapped_species))
-        for cls in class_order:
-            aggregated_prompts = []
-            for species_name in family_species:
-                species_diseases = species_prompts.get(species_name, {}).get("diseases", {})
-                config_key = diseases_lower.get(cls.lower(), cls)
-                prompts_for_class = (
-                    species_diseases.get(config_key)
-                    or species_diseases.get(cls)
-                    or next(
-                        (
-                            prompts
-                            for key, prompts in species_diseases.items()
-                            if key.lower() == cls.lower()
-                        ),
-                        [],
-                    )
-                )
-                aggregated_prompts.extend(prompts_for_class)
-            if not aggregated_prompts:
-                raise KeyError(
-                    f"Missing textual prompts for class '{cls}' in family '{family_name}'."
-                )
-            prompts_per_class.append(aggregated_prompts)
-
-        classnames = [c.replace("_", " ") for c in class_order]
-        prompt_learner = build_prompt_learner(
-            classnames=classnames,
-            clip_wrapper=clip_wrapper,
-            device=device,
-            prompts_per_class=prompts_per_class,
-            model_name=model_name,
+        ctx_init = compute_init_ctx(
             n_ctx=16,
-            ctx_init=None,
-            class_token_position="end",
-            alpha_seed=0.3,
+            clip_wrapper=clip_wrapper,
+            class_prompts=class_prompts,
         )
+
+        prompt_learner = PromptLearnerOpenCLIP(
+            classnames,
+            clip_wrapper.model,
+            n_ctx=16,
+            ctx_init=None,  
+            ctx_vectors=ctx_init,
+            model_name=model_name,
+        ).to(device)
 
         trainer = PromptTuningTrainer(
-            clip_wrapper,
-            device,
-            prompt_learner,
-            temperature=0.07,
+            clip_wrapper=clip_wrapper,
+            device=device,
+            prompt_learner=prompt_learner,
+            temperature=config.temperature,
         )
 
-        optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=5e-3, weight_decay=0.0)
-        history = trainer.fit(
-            optimizer,
-            train_loader,
-            epochs=epochs,
-            grad_clip=None,
-            log_fn=lambda msg, family=family_name: print(f"[{family}] {msg}"),
-        )
-
-        plant_results = {
-            "history": history,
-            "label_map": train_dataset.label_maps(),
-            "class_order": class_order,
-            "train_samples": len(train_dataset),
-            "val_samples": len(val_dataset) if val_dataset is not None else 0,
-            "test_samples": len(test_dataset) if test_dataset is not None else 0,
+        fit_args = {
+            "epochs": config.epochs,
+            "batch_size": config.batch_size,
+            "lr": config.lr,
+            "log_fn": lambda msg, fam=family_name: print(f"[{fam}] {msg}"),
         }
-        if test_loader is not None and hasattr(trainer, "evaluate"):
-            plant_results["test"] = trainer.evaluate(prompt_learner, test_loader)
 
-        if embeddings_dir is not None:
-            family_file = embeddings_dir / f"{family_name}.pt"
+        result = benchmark.run(
+            family_id=family_name,
+            trainer=trainer,
+            segment_fn=segment_fn,
+            perc_eval=config.perc_eval,
+            fit_predictor_args=fit_args,
+        )
+
+        test_dataset = PlantData(
+            dataset_root=config.dataset_path,
+            family_id=family_name,
+            split="test",
+            segment_fn=segment_fn,
+            transform=clip_wrapper.preprocess,
+        )
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+        )
+        test_loss = 0.0
+        test_correct = 0
+        test_total = 0
+        for xb, yb in test_loader:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            outputs = trainer.predict(xb)
+            logits = outputs["logits"]
+            preds = outputs["pred_indices"]
+            test_loss += F.cross_entropy(logits, yb, reduction="sum").item()
+            test_correct += (preds == yb).sum().item()
+            test_total += yb.size(0)
+        test_metrics = {
+            "loss": test_loss / max(test_total, 1),
+            "accuracy": test_correct / max(test_total, 1),
+        }
+        result["test_metrics"] = test_metrics
+
+        if config.embeddings_dir is not None:
+            family_file = config.embeddings_dir / f"{family_name}.pt"
             export_family_embeddings(
                 family_file,
                 family_name,
-                class_order,
+                classnames,
                 prompt_learner,
                 clip_wrapper.text_encoder,
                 temperature=trainer.temperature,
             )
-            index_payload["families"][family_name] = {
-                "file": family_file.name,
-                "classes": class_order,
+
+        family_results[family_name] = result
+
+        test_metrics = result["test_metrics"]
+        eval_metrics = result.get("eval_metrics")
+        summary_rows.append(
+            {
+                "family_id": family_name,
+                "train_samples": result["train_samples"],
+                "eval_samples": result["eval_samples"],
+                "test_samples": result["test_samples"],
+                "eval_loss": eval_metrics["loss"] if eval_metrics else None,
+                "eval_accuracy": eval_metrics["accuracy"] if eval_metrics else None,
+                "test_loss": test_metrics["loss"],
+                "test_accuracy": test_metrics["accuracy"],
+                "temperature": result["temperature"],
             }
+        )
 
-        results[family_name] = plant_results
+    if summary_rows:
+        csv_path = Path(benchmark.run_dir) / "results.csv"
+        fieldnames = list(summary_rows[0].keys())
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(summary_rows)
+        print(f"Results saved to {csv_path}")
 
-    for family_name, plant_results in results.items():
-        if "test" in plant_results:
-            test_metrics = plant_results["test"]
-            print(
-                f"[{family_name}] test loss {test_metrics.loss:.4f} "
-                f"acc {test_metrics.accuracy:.3f}"
-            )
+        test_accs = [
+            row["test_accuracy"] for row in summary_rows if row["test_accuracy"] is not None
+        ]
+        if test_accs:
+            avg_acc = sum(test_accs) / len(test_accs)
+            print(f"Average test accuracy: {avg_acc:.3f}")
 
-    if embeddings_dir is not None and index_payload["families"]:
-        index_path = embeddings_dir / "index.json"
+    """if config.embeddings_dir is not None and index_payload["families"]:
+        index_path = config.embeddings_dir / "index.json"
         with open(index_path, "w", encoding="utf-8") as f:
             json.dump(index_payload, f, indent=2)
+        print(f"Embeddings index saved to {index_path}")"""
 
-    return results
+    return family_results
+
 
 if __name__ == "__main__":
     main()

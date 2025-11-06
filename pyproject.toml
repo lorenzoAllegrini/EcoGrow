@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "ecogrow"
+version = "0.1.0"
+description = "EcoGrow ML components and benchmarks."
+authors = ["EcoGrow Team <team@ecogrow.local>"]
+packages = [{ include = "ecogrow" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.12"
+fastapi = ">=0.110.0"
+uvicorn = { version = ">=0.22.0", extras = ["standard"] }
+open-clip-torch = ">=2.24.0"
+torch = ">=2.1.0"
+torchvision = ">=0.16.0"
+pillow = ">=10.0.0"
+numpy = ">=1.24.0,<2.0.0"
+rembg = ">=2.0.50"
+python-multipart = ">=0.0.6"
+roboflow = ">=1.1.22"
+onnxruntime-silicon = ">=1.15.0"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"

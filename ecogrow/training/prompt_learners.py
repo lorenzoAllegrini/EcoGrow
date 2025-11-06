@@ -79,12 +79,14 @@ class PromptLearnerOpenCLIP(nn.Module):
 
         # lunghezze del nome (per “middle” e “front”)
         self.name_lens = [len(self._tokenizer.encode(n)) for n in self.classnames]
+        self.ctx.requires_grad_(True)
 
     def forward(self, img_features=None):
         # (per CoCoOp useresti img_features per condizionare self.ctx; qui è CoOp “semplice”)
         ctx = self.ctx
         if ctx.dim() == 2:
-            ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)   # [C, n_ctx, D]
+            # repeat evita stride a zero di expand che in PyTorch 2.9 può annullare i gradienti
+            ctx = ctx.unsqueeze(0).repeat(self.n_cls, 1, 1)     # [C, n_ctx, D]
 
         prefix = self.token_prefix                               # [C,1,D]
         suffix = self.token_suffix                               # [C,*,D]
@@ -124,4 +126,3 @@ class PromptLearnerOpenCLIP(nn.Module):
         return prompts, tokenized
     
         
-

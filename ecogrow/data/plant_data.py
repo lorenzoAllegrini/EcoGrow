@@ -11,11 +11,13 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
-DEFAULT_MAPPING: Dict[str, str] = {
+DEFAULT_SPECIES_TO_FAMILY: Dict[str, str] = {
     "Money_Plant": "Araceae",
     "Snake_Plant": "Asparagaceae",
     "Spider_Plant": "Asparagaceae",
 }
+
+DEFAULT_MAPPING: Dict[str, str] = DEFAULT_SPECIES_TO_FAMILY
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -59,6 +61,7 @@ class PlantData(Dataset):
         dataset_root: str | Path,
         family_id: str,
         train: bool = True,
+        split: Optional[str] = None,
         segment_fn: Optional[Callable[[Image.Image], Image.Image]] = None,
         transform: Optional[Callable[[Image.Image], object]] = None,
         split_name: Optional[str] = None,
@@ -68,7 +71,15 @@ class PlantData(Dataset):
         self.segment_fn = segment_fn
         self.transform = transform
 
-        self.split = split_name or ("train" if train else "test")
+        if split is not None and split_name is not None:
+            raise ValueError("Passa solo uno tra 'split' e 'split_name'.")
+
+        if split is not None:
+            resolved_split = split
+        else:
+            resolved_split = split_name or ("train" if train else "test")
+
+        self.split = resolved_split
         self._prepare_samples()
 
     # ------------------------------------------------------------------
@@ -114,6 +125,26 @@ class PlantData(Dataset):
         self.class_to_idx = class_to_idx
         self.idx_to_class = {idx: label for label, idx in class_to_idx.items()}
 
+    def make_dataloader(
+        self,
+        batch_size: int,
+        shuffle: bool = False,
+        *,
+        num_workers: int = 0,
+        pin_memory: bool = False,
+        drop_last: bool = False,
+    ) -> DataLoader:
+        """Create a DataLoader with sane defaults for vision datasets."""
+
+        return DataLoader(
+            self,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+        )
+
     def _resolve_family_dir(self) -> Path:
         split_dir = self.root / self.split
         if not split_dir.is_dir():
@@ -150,7 +181,10 @@ def roboflow_format(
     *,
     overwrite: bool = False,
 ) -> None:
-    """Convert a Roboflow folder export into the layout expected by EcoGrow."""
+    """Convert a Roboflow folder export into the layout expected by EcoGrow.
+
+    All source splits (train/valid/test) are collapsed into the single split `train`.
+    """
 
     src_root = Path(init_root).expanduser().resolve()
     dst_root = Path(final_root).expanduser().resolve()
@@ -180,13 +214,18 @@ def roboflow_format(
         if not split_dir.is_dir():
             continue
         split_name = split_dir.name.lower()
+        target_split = "train" if split_name in {"train", "valid"} else "test"
         for class_dir in split_dir.iterdir():
             if not class_dir.is_dir():
                 continue
             family_name, species_name, disease_name = resolve_family_and_disease(
                 class_dir.name
             )
-            dest_dir = dst_root / split_name / family_name / species_name / disease_name
+            # Map train/valid into the train split; everything else goes to test so
+            # downstream code retains a simple train/test structure.
+            dest_dir = (
+                dst_root / target_split / family_name / disease_name
+            )
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             for img_path in class_dir.iterdir():
@@ -202,4 +241,10 @@ def roboflow_format(
                 shutil.copy2(img_path, dest_path)
 
 
-__all__ = ["PlantData", "make_segment_fn", "roboflow_format", "DEFAULT_MAPPING"]
+__all__ = [
+    "PlantData",
+    "make_segment_fn",
+    "roboflow_format",
+    "DEFAULT_MAPPING",
+    "DEFAULT_SPECIES_TO_FAMILY",
+]
