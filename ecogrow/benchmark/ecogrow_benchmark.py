@@ -1,25 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-)
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
-import logging
-
+import torch.nn.functional as F
+import torch
 from torch.utils.data import DataLoader, Subset
 
 from ecogrow.data.plant_data import PlantData
-from ecogrow.models.open_clip_wrapper import OpenClipWrapper
-from ecogrow.training.prompt_learners import PromptLearnerOpenCLIP
-from ecogrow.training.trainers import PromptTuningTrainer
+from ecogrow.training.trainers import PromptTuningTrainer, EpochMetrics
 
 class EcogrowBenchmark:
     def __init__(
@@ -35,30 +26,44 @@ class EcogrowBenchmark:
             exp_dir (str): The directory where the results of this run are stored.
             data_root (str): The root directory of the NASA dataset.
         """
-        self.run_id = self.run_id
-        self.exp_dir = exp_dir
+        self.run_id = run_id
+        self.exp_dir = os.path.abspath(exp_dir)
+        os.makedirs(self.exp_dir, exist_ok=True)
+        self.run_dir = os.path.join(self.exp_dir, self.run_id)
         self.data_root: str = data_root
         self.all_results: List[Dict[str, Any]] = []
      
-    def load_channel(self, family_id: str) -> Tuple[PlantData, PlantData]:
+    def load_channel(
+        self,
+        family_id: str,
+        *,
+        transform=None,
+        segment_fn=None,
+    ) -> Tuple[PlantData, PlantData]:
         """Load the training and testing datasets for a given plant.
 
         Args:
             family_id (str): the ID of the family of palnts to be used
+            transform: optional transform to apply when fetching samples.
+            segment_fn: optional preprocessing callable used before the transform.
 
         Returns:
-            Tuple[NASA, NASA]: training and testing datasets
+            Tuple[PlantData, PlantData]: training and testing datasets
         """
         train_data = PlantData(
             dataset_root=self.data_root,
-            family=family_id,
+            family_id=family_id,
             split="train",
+            transform=transform,
+            segment_fn=segment_fn,
         )
 
         test_data = PlantData(
             dataset_root=self.data_root,
-            family=family_id,
+            family_id=family_id,
             split="test",
+            transform=transform,
+            segment_fn=segment_fn,
         )
 
         return train_data, test_data
@@ -66,56 +71,126 @@ class EcogrowBenchmark:
     def run(
         self,
         family_id: str,
-        model : OpenClipWrapper,
-        prompt_learner: PromptLearnerOpenCLIP,
-        fit_predictor_args: Optional[Dict[str, Any]] = None,
+        trainer: PromptTuningTrainer,
+        segment_fn: Any,
         perc_eval: Optional[float] = 0.2,
-    ):
+        fit_predictor_args: Optional[Dict[str, Any]] = None,    
+    ) -> Dict[str, Any]:
         """Runs the benchmark for a given family.
 
         Args:
             family_id (str): the ID of the channel to be used
-            fit_predictor_args (Optional[Dict[str, Any]]): additional arguments for the predictor's fit method
+            trainer (PromptTuningTrainer): pre-configured trainer to be tuned.
+            fit_predictor_args (Optional[Dict[str, Any]]): arguments controlling optimisation.
             perc_eval (Optional[float]): the percentage of the training data to be used for evaluation
+
+        Returns:
+            Dict[str, Any]: collected metrics and bookkeeping for the run.
         """
-        
-        train_channel, test_channel = self.load_channel(
-            family_id,
-        )
         os.makedirs(self.run_dir, exist_ok=True)
 
-        results: Dict[str, Any] = {"family_id": family_id}
-        train_history = None
+        fit_args = dict(fit_predictor_args or {})
 
-        if fit_predictor_args is not None:
-            logging.info(f"Fitting the predictor for family {family_id}...")
-            # Training the predictor
-            batch_size = fit_predictor_args.pop("batch_size", 16)
-            eval_data = None
-            if perc_eval is not None:
-                # Split the training data into training and evaluation sets
-                indices = np.arange(len(train_channel))
-                np.random.shuffle(indices)
-                eval_size = int(len(train_channel) * perc_eval)
-                eval_channel = Subset(train_channel, indices[:eval_size])
-                train_channel = Subset(train_channel, indices[eval_size:])
-            train_loader = DataLoader(
-                train_channel,
+        clip_wrapper = trainer.clip_wrapper
+        prompt_learner = trainer.prompt_learner
+
+        batch_size = fit_args.pop("batch_size", 16)
+        epochs = fit_args.pop("epochs", 10)
+        optimizer = fit_args.pop("optimizer", None)
+        lr = fit_args.pop("lr", 5e-3)
+        scheduler = fit_args.pop("scheduler", None)
+        grad_clip = fit_args.pop("grad_clip", None)
+        log_fn = fit_args.pop("log_fn", logging.info)
+
+        if fit_args:
+            unknown = ", ".join(sorted(fit_args.keys()))
+            raise ValueError(f"Unsupported fit arguments: {unknown}")
+
+        train_data, test_data = self.load_channel(
+            family_id,
+            transform=clip_wrapper.preprocess,
+            segment_fn=segment_fn,
+        )
+
+        if perc_eval is not None and perc_eval > 0:
+            indices = np.arange(len(train_data))
+            np.random.shuffle(indices)
+            eval_size = max(int(len(train_data) * perc_eval), 1)
+            eval_dataset = Subset(train_data, indices[:eval_size])
+            train_data = Subset(train_data, indices[eval_size:])
+        else:
+            eval_dataset = None
+
+        train_loader = DataLoader(
+            train_data,
+            batch_size=batch_size,
+            shuffle=True,
+        )
+        eval_loader = (
+            DataLoader(
+                eval_dataset,
                 batch_size=batch_size,
-                shuffle=True,
+                shuffle=False,
             )
-            eval_loader = (
-                DataLoader(
-                    eval_channel,
-                    batch_size=batch_size,
-                    shuffle=False,
-                )
-                if eval_channel is not None
-                else None
+            if eval_dataset is not None
+            else None
+        )
+
+        if optimizer is None:
+            optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=lr)
+
+        logging.info(
+            "Starting fine-tuning for family '%s' | epochs=%d batch_size=%d",
+            family_id,
+            epochs,
+            batch_size,
+        )
+
+        history = trainer.fit(
+            optimizer=optimizer,
+            train_loader=train_loader,
+            epochs=epochs,
+            scheduler=scheduler,
+            grad_clip=grad_clip,
+            log_fn=log_fn,
+        )
+
+        eval_metrics: Optional[EpochMetrics] = None
+        if eval_loader is not None:
+            eval_total = 0
+            eval_correct = 0
+            eval_loss = 0.0
+
+            for xb, yb in eval_loader:
+                xb = xb.to(trainer.device)
+                yb = yb.to(trainer.device)
+                outputs = trainer.predict(xb)
+                logits = outputs["logits"]
+                pred_idx = outputs["pred_indices"]
+
+                eval_loss += F.cross_entropy(logits, yb, reduction="sum").item()
+                eval_correct += (pred_idx == yb).sum().item()
+                eval_total += yb.size(0)
+
+            eval_metrics = EpochMetrics(
+                loss=eval_loss / max(eval_total, 1),
+                accuracy=eval_correct / max(eval_total, 1),
             )
-            train_history = model.fit(
-                train_loader=train_loader,
-                valid_loader=eval_loader,
-                **fit_predictor_args,
-            )
-         
+
+        results: Dict[str, Any] = {
+            "family_id": family_id,
+            "train_history": history,
+            "train_samples": len(train_loader.dataset),
+            "eval_samples": len(eval_loader.dataset) if eval_loader is not None else 0,
+            "test_samples": len(test_data),
+            "temperature": trainer.temperature,
+        }
+
+        if eval_metrics is not None:
+            results["eval_metrics"] = {
+                "loss": eval_metrics.loss,
+                "accuracy": eval_metrics.accuracy,
+            }
+
+        self.all_results.append(results)
+        return results

@@ -131,3 +131,4 @@ class TextEncoderOpenCLIP(nn.Module):
             return torch.stack(outs, dim=0)                 # [B, C, D_out]
         else:
             raise ValueError("prompts_embeds must be [C,L,D] or [B,C,L,D]")
+
