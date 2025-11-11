@@ -64,7 +64,7 @@ Lo script `experiments/clip_experiment.py` esegue il seguente flusso:
 1. **Caricamento configurazioni**: risolve percorso dataset, directory risultati e JSON dei prompt; crea un `run_id` per la sessione.
 2. **Inizializzazione del modello**: carica OpenCLIP (`ViT-B-32` di default), congela il backbone e prepara il wrapper per l encoding immagine/testo.
 3. **Preparazione dei dati**: per ogni famiglia costruisce `PlantData` con trasformazioni CLIP e segmentazione automatica (`segment_plant_rgba` + crop + compositing su sfondo nero).
-4. **Prompt tuning**: genera il contesto iniziale con `compute_init_ctx`, istanzia `PromptLearnerOpenCLIP` e addestra solo i token di prompt tramite `PromptTuningTrainer` usando AdamW (batch size, lr e temperatura configurabili).
+4. **Prompt tuning**: genera il contesto iniziale con `compute_init_ctx`, istanzia `ClipPromptLearner` e addestra solo i token di prompt tramite `ClipPromptEngine` usando AdamW (batch size, lr e temperatura configurabili).
 5. **Valutazione**: calcola metriche su validation (se `--perc-eval > 0`) e su test; opzionalmente esporta embedding testuali per ogni famiglia.
 6. **Output finale**: stampa metriche aggregate, salva `results.csv` e, se richiesto, file `.pt` con embedding e runtime log nella cartella della run.
 

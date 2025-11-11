@@ -2,7 +2,8 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    PORT=8000
 
 WORKDIR /app
 
@@ -17,15 +18,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libjpeg62-turbo \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
 ENV ECOGROW_EMBEDDINGS_DIR=/app/artifacts \
     ECOGROW_CLIP_MODEL_NAME=ViT-B-32 \
-    ECOGROW_CLIP_PRETRAINED=laion2b_s34b_b79k
+    ECOGROW_CLIP_PRETRAINED=laion2b_s34b_b79k \
+    ECOGROW_SEGMENTATION=1
 
-EXPOSE 8080
+EXPOSE 8000
 
-CMD ["uvicorn", "ecoGrow.inference_service:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "inference.inference_service:app"]

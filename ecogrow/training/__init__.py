@@ -1,5 +1,5 @@
-from .prompt_learners import PromptLearnerOpenCLIP
-from .trainers import PromptTuningTrainer
+from .prompt_learners import ClipPromptLearner
+from .trainers import ClipPromptEngine
 
 
-__all__ = ["PromptLearnerOpenCLIP", "PromptTuningTrainer"]
+__all__ = ["ClipPromptLearner", "ClipPromptEngine"]

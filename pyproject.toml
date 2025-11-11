@@ -7,15 +7,14 @@ packages = [{ include = "ecogrow" }]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.12"
-fastapi = ">=0.110.0"
-uvicorn = { version = ">=0.22.0", extras = ["standard"] }
+flask = ">=3.0.0"
+gunicorn = ">=21.2.0"
 open-clip-torch = ">=2.24.0"
 torch = { version = "2.2.2+cpu", source = "pytorch-cpu" }
 torchvision = { version = "0.17.2+cpu", source = "pytorch-cpu" }
 pillow = ">=10.0.0"
 numpy = ">=1.24.0,<2.0.0"
 rembg = ">=2.0.50"
-python-multipart = ">=0.0.6"
 roboflow = ">=1.1.22"
 onnxruntime = { version = ">=1.15.0", markers = "platform_system != 'Darwin'" }
 onnxruntime-silicon = { version = ">=1.15.0", markers = "platform_system == 'Darwin'" }

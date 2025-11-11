@@ -21,7 +21,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source",
-        default=str(PROJECT_ROOT / "roboflow_data"),
+        default=str(PROJECT_ROOT / "Indoor"),
         help="Percorso della directory Roboflow da cui leggere i dati (default: ./roboflow_data).",
     )
     parser.add_argument(

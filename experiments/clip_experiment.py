@@ -19,14 +19,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import OpenClipWrapper, TextEncoderOpenCLIP
+from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
     segment_plant_rgba,
 )
-from ecogrow.training.prompt_learners import PromptLearnerOpenCLIP
-from ecogrow.training.trainers import PromptTuningTrainer
+from ecogrow.training.prompt_learners import ClipPromptLearner
+from ecogrow.training.trainers import ClipPromptEngine
 from ecogrow.data.plant_data import PlantData, make_segment_fn
 from experiments.utils import compute_init_ctx, export_family_embeddings
 
@@ -54,7 +54,7 @@ def _parse_args() -> Config:
     )
     parser.add_argument(
         "--embeddings-dir",
-        default=None,
+        default="experiment/clip_prompts",
         help="Directory in cui salvare gli embedding generati (opzionale)",
     )
     parser.add_argument(
@@ -142,16 +142,15 @@ def _parse_args() -> Config:
 def main() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
 
-    device_str = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device_str)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = "ViT-B-32"
-    
-    clip_wrapper = OpenClipWrapper(
+    pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
+    clip_model, preprocess, tokenizer, text_encoder = init_open_clip(
         model_name=model_name,
-        pretrained_tag=os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k"),
-        device=device_str,
+        pretrained_tag=pretrained_tag,
+        device=device,
     )
-    clip_wrapper.freeze_backbone()
+    freeze_open_clip_backbone(clip_model)
 
     benchmark = EcogrowBenchmark(
         run_id=config.run_id,
@@ -173,6 +172,7 @@ def main() -> Dict[str, Dict[str, object]]:
     summary_rows: List[Dict[str, object]] = []
 
     num_families = len(prompt_config)
+    index_entries: List[Dict[str, object]] = []
     for i, (family_name, family_cfg) in enumerate(prompt_config.items(), start=1):
         print(f"[{i}/{num_families}] Family: {family_name}")
 
@@ -181,22 +181,25 @@ def main() -> Dict[str, Dict[str, object]]:
 
         ctx_init = compute_init_ctx(
             n_ctx=16,
-            clip_wrapper=clip_wrapper,
+            clip_model=clip_model,
+            tokenizer=tokenizer,
             class_prompts=class_prompts,
         )
 
-        prompt_learner = PromptLearnerOpenCLIP(
+        prompt_learner = ClipPromptLearner(
             classnames,
-            clip_wrapper.model,
-            n_ctx=16,
-            ctx_init=None,  
+            clip_model,
             ctx_vectors=ctx_init,
             model_name=model_name,
         ).to(device)
 
-        trainer = PromptTuningTrainer(
-            clip_wrapper=clip_wrapper,
+        trainer = ClipPromptEngine(
+            clip_model=clip_model,
+            text_encoder=text_encoder,
+            preprocess=preprocess,
             device=device,
+            class_names=classnames,
+            family_name=family_name,
             prompt_learner=prompt_learner,
             temperature=config.temperature,
         )
@@ -221,7 +224,7 @@ def main() -> Dict[str, Dict[str, object]]:
             family_id=family_name,
             split="test",
             segment_fn=segment_fn,
-            transform=clip_wrapper.preprocess,
+            transform=preprocess,
         )
         test_loader = torch.utils.data.DataLoader(
             test_dataset,
@@ -234,9 +237,9 @@ def main() -> Dict[str, Dict[str, object]]:
         for xb, yb in test_loader:
             xb = xb.to(device)
             yb = yb.to(device)
-            outputs = trainer.predict(xb)
-            logits = outputs["logits"]
-            preds = outputs["pred_indices"]
+            with torch.no_grad():
+                logits = trainer.detector.logits(xb)
+            preds = logits.argmax(dim=-1)
             test_loss += F.cross_entropy(logits, yb, reduction="sum").item()
             test_correct += (preds == yb).sum().item()
             test_total += yb.size(0)
@@ -248,13 +251,21 @@ def main() -> Dict[str, Dict[str, object]]:
 
         if config.embeddings_dir is not None:
             family_file = config.embeddings_dir / f"{family_name}.pt"
-            export_family_embeddings(
+            exported = export_family_embeddings(
                 family_file,
                 family_name,
                 classnames,
                 prompt_learner,
-                clip_wrapper.text_encoder,
+                text_encoder,
                 temperature=trainer.temperature,
+            )
+            index_entries.append(
+                {
+                    "family": family_name,
+                    "classes": list(exported["classes"]),
+                    "file": family_file.name,
+                    "temperature": exported["temperature"],
+                }
             )
 
         family_results[family_name] = result
@@ -291,11 +302,16 @@ def main() -> Dict[str, Dict[str, object]]:
             avg_acc = sum(test_accs) / len(test_accs)
             print(f"Average test accuracy: {avg_acc:.3f}")
 
-    """if config.embeddings_dir is not None and index_payload["families"]:
+    if config.embeddings_dir is not None and index_entries:
+        index_payload = {
+            "clip_model": model_name,
+            "pretrained": pretrained_tag,
+            "families": index_entries,
+        }
         index_path = config.embeddings_dir / "index.json"
         with open(index_path, "w", encoding="utf-8") as f:
             json.dump(index_payload, f, indent=2)
-        print(f"Embeddings index saved to {index_path}")"""
+        print(f"Embeddings index saved to {index_path}")
 
     return family_results
 

@@ -6,18 +6,52 @@ import shutil
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
-
-DEFAULT_SPECIES_TO_FAMILY: Dict[str, str] = {
-    "Money_Plant": "Araceae",
-    "Snake_Plant": "Asparagaceae",
-    "Spider_Plant": "Asparagaceae",
+# 🌿 SPECIE
+DEFAULT_SPECIES = {
+    "chrysanthemum",
+    "hibiscus",
+    "money_plant",
+    "rose",
+    "turmeric",
+    "snake_plant",
+    "spider_plant",
+    "aloe",
+    "cactus",
 }
 
-DEFAULT_MAPPING: Dict[str, str] = DEFAULT_SPECIES_TO_FAMILY
+# 🦠 MALATTIE / CONDIZIONI
+DEFAULT_DISEASES = {
+    "bacterial_leaf_spot",
+    "septoria_leaf_spot",
+    "blight",
+    "necrosis",
+    "scorch",
+    "bacterial_wilt",
+    "chlorosis",
+    "manganese_toxicity",
+    "black_spot",
+    "downy_mildew",
+    "mosaic_virus",
+    "powdery_mildew",
+    "rust",
+    "yellow_mosaic_virus",
+    "aphid_infestation",
+    "blotch",
+    "leaf_necrosis",
+    "leaf_spot",
+    "healthy",
+    "anthracnose",
+    "leaf_withering",
+    "fungal_leaf_spot",
+    "leaf_tip_necrosis",
+    "sunburn",
+    "insect_damage",
+    "dactylopius_opuntia"
+}
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -174,16 +208,35 @@ class PlantData(Dataset):
             "label2idx": dict(self.class_to_idx),
         }
 
+from pathlib import Path
+from typing import Set, Tuple
+import shutil, random, os
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+
 def roboflow_format(
     init_root: str,
     final_root: str,
-    species_to_family: Optional[Dict[str, str]] = None,
+    default_species: Set[str] = DEFAULT_SPECIES,
+    default_diseases: Set[str] = DEFAULT_DISEASES,
     *,
     overwrite: bool = False,
+    test_ratio: float = 0.20,
+    seed: int = 1337,
 ) -> None:
-    """Convert a Roboflow folder export into the layout expected by EcoGrow.
+    """Convert a Roboflow folder export (con o senza split) nel layout EcoGrow.
 
-    All source splits (train/valid/test) are collapsed into the single split `train`.
+    Supporta due tipologie di dataset di input:
+    1) Con split: dentro `init_root` ci sono cartelle `train/valid/val/test` e,
+       dentro ciascuna, cartelle di classe con nome combinato pianta+malattia
+       (es. `Money_Plant_Bacterial_wilt_disease`) che contengono direttamente le immagini.
+       Mapping: train+valid/val -> train ; test -> test.
+    2) Senza split: due varianti gestite automaticamente:
+       2a) Flat: cartelle di classe direttamente in root (nome combinato pianta+malattia)
+           che contengono le immagini.
+       2b) Annidato: cartelle per pianta in root, e dentro ciascuna cartelle per malattia
+           (es. `Rose/Black_Spot`, `Rose/Healthy`), con le immagini all'interno.
+           In questo caso viene creato uno split deterministico 80/20 per classe (configurabile).
     """
 
     src_root = Path(init_root).expanduser().resolve()
@@ -192,54 +245,141 @@ def roboflow_format(
         raise FileNotFoundError(f"Sorgente '{src_root}' non trovata.")
     dst_root.mkdir(parents=True, exist_ok=True)
 
-    mapping = species_to_family or DEFAULT_MAPPING
+    random_gen = random.Random(seed)
 
-    def resolve_family_and_disease(name: str) -> Tuple[str, str, str]:
-        clean = name.replace("-", "_").strip("_")
+    def resolve_family_and_disease(name: str) -> Tuple[str, str]:
+        clean = name.replace("-", "_").replace(" ", "_").strip("_")
         lower = clean.lower()
-        for species, family in mapping.items():
-            key = species.lower()
-            if lower.startswith(key):
-                remaining = clean[len(species):].strip("_")
-                if not remaining and "_" in name:
-                    remaining = name.split("_", 1)[1]
-                disease = remaining or "healthy"
-                return family.lower(), species, disease
-        parts = clean.split("_", 1)
-        if len(parts) == 2:
-            return parts[0], name.split("_", 1)[0], parts[1] or "unknown"
-        return clean, name, "unknown"
+        s = None
+        d = None
+        for specie in default_species:
+            if specie in lower:
+                s = specie
+        for disease in default_diseases:
+            if disease in lower:
+                d = disease
+        if not s:
+            raise ValueError(f"Specie non supportata in '{lower}'")
+        if not d:
+            raise ValueError(f"Malattia/condizione non supportata in '{lower}'")
+        return s, d
 
-    for split_dir in src_root.iterdir():
-        if not split_dir.is_dir():
-            continue
-        split_name = split_dir.name.lower()
-        target_split = "train" if split_name in {"train", "valid"} else "test"
-        for class_dir in split_dir.iterdir():
-            if not class_dir.is_dir():
+    def iter_images(dir_path: Path):
+        for p in dir_path.iterdir():
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS:
+                yield p
+
+    def dir_has_images(dir_path: Path) -> bool:
+        return any(
+            p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS for p in dir_path.iterdir()
+        )
+
+    def safe_copy(src: Path, dst: Path):
+        """Copia gestendo collisioni di nome se overwrite=False."""
+        target = dst
+        if target.exists():
+            if overwrite:
+                target.unlink()
+            else:
+                stem, ext = target.stem, target.suffix
+                k = 1
+                while target.exists():
+                    target = target.with_name(f"{stem}_{k}{ext}")
+                    k += 1
+        shutil.copy2(src, target)
+
+    # Rileva se lo schema ha split o no
+    split_names = {"train", "valid", "val", "test"}
+    has_splits = any(
+        d.is_dir() and d.name.lower() in split_names
+        for d in src_root.iterdir()
+    )
+
+    if has_splits:
+        # Schema con split alla Roboflow
+        for split_dir in src_root.iterdir():
+            if not split_dir.is_dir():
                 continue
-            family_name, species_name, disease_name = resolve_family_and_disease(
-                class_dir.name
-            )
-            # Map train/valid into the train split; everything else goes to test so
-            # downstream code retains a simple train/test structure.
-            dest_dir = (
-                dst_root / target_split / family_name / disease_name
-            )
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            name_l = split_dir.name.lower()
+            if name_l not in split_names:
+                # cartella extra: ignora
+                continue
+            target_split = "train" if name_l in {"train", "valid", "val"} else "test"
 
-            for img_path in class_dir.iterdir():
-                if not img_path.is_file():
+            for class_dir in split_dir.iterdir():
+                if not class_dir.is_dir():
                     continue
-                if img_path.suffix.lower() not in IMAGE_EXTENSIONS:
-                    continue
-                dest_path = dest_dir / img_path.name
-                if dest_path.exists():
-                    if not overwrite:
+                specie_name, disease_name = resolve_family_and_disease(class_dir.name)
+                dest_dir = dst_root / target_split / specie_name / disease_name
+                dest_dir.mkdir(parents=True, exist_ok=True)
+
+                for img_path in iter_images(class_dir):
+                    dest_path = dest_dir / img_path.name
+                    safe_copy(img_path, dest_path)
+    else:
+        # Nessuno split: gestisce sia layout flat (classi direttamente in root)
+        # sia layout annidato (pianta/ -> malattia/ -> immagini). In entrambi i casi
+        # crea split 80/20 per classe in modo deterministico.
+
+        for top_dir in src_root.iterdir():
+            if not top_dir.is_dir():
+                continue
+
+            if dir_has_images(top_dir):
+                # Layout flat: la cartella è già una classe combinata pianta+malattia
+                specie_name, disease_name = resolve_family_and_disease(top_dir.name)
+                imgs = list(iter_images(top_dir))
+                imgs.sort(key=lambda p: p.name)
+                random_gen.shuffle(imgs)
+
+                n_total = len(imgs)
+                n_test = int(round(n_total * test_ratio))
+                test_set = set(imgs[:n_test])
+                train_set = imgs[n_test:]
+
+                for img_path in train_set:
+                    dest_dir = dst_root / "train" / specie_name / disease_name
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    dest_path = dest_dir / img_path.name
+                    safe_copy(img_path, dest_path)
+
+                for img_path in test_set:
+                    dest_dir = dst_root / "test" / specie_name / disease_name
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    dest_path = dest_dir / img_path.name
+                    safe_copy(img_path, dest_path)
+            else:
+                # Possibile layout annidato: dentro `top_dir` ci sono sottocartelle per malattia
+                for disease_dir in top_dir.iterdir():
+                    if not disease_dir.is_dir():
                         continue
-                    dest_path.unlink()
-                shutil.copy2(img_path, dest_path)
+                    if not dir_has_images(disease_dir):
+                        # Sottocartella non valida (ulteriore nesting o vuota): salta
+                        continue
+                    # Risolvi specie+malattia usando i nomi combinati plant+disease
+                    combined_name = f"{top_dir.name}_{disease_dir.name}"
+                    specie_name, disease_name = resolve_family_and_disease(combined_name)
 
+                    imgs = list(iter_images(disease_dir))
+                    imgs.sort(key=lambda p: p.name)
+                    random_gen.shuffle(imgs)
+
+                    n_total = len(imgs)
+                    n_test = int(round(n_total * test_ratio))
+                    test_set = set(imgs[:n_test])
+                    train_set = imgs[n_test:]
+
+                    for img_path in train_set:
+                        dest_dir = dst_root / "train" / specie_name / disease_name
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        dest_path = dest_dir / img_path.name
+                        safe_copy(img_path, dest_path)
+
+                    for img_path in test_set:
+                        dest_dir = dst_root / "test" / specie_name / disease_name
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        dest_path = dest_dir / img_path.name
+                        safe_copy(img_path, dest_path)
 
 __all__ = [
     "PlantData",
