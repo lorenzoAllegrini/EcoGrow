@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from ecogrow.data.plant_data import PlantData
-from ecogrow.training.trainers import ClipPromptEngine, EpochMetrics
+from ecogrow.training.trainers import EpochMetrics
 
 class EcogrowBenchmark:
     def __init__(
@@ -71,7 +71,7 @@ class EcogrowBenchmark:
     def run(
         self,
         family_id: str,
-        trainer: ClipPromptEngine,
+        trainer,
         segment_fn: Any,
         perc_eval: Optional[float] = 0.2,
         fit_predictor_args: Optional[Dict[str, Any]] = None,    
@@ -80,7 +80,7 @@ class EcogrowBenchmark:
 
         Args:
             family_id (str): the ID of the channel to be used
-            trainer (ClipPromptEngine): pre-configured trainer to be tuned.
+            trainer: pre-configured trainer compatible with the benchmark interface.
             fit_predictor_args (Optional[Dict[str, Any]]): arguments controlling optimisation.
             perc_eval (Optional[float]): the percentage of the training data to be used for evaluation
 
@@ -91,7 +91,6 @@ class EcogrowBenchmark:
 
         fit_args = dict(fit_predictor_args or {})
 
-        prompt_learner = trainer.prompt_learner
         preprocess = trainer.preprocess_fn
 
         batch_size = fit_args.pop("batch_size", 16)
@@ -137,7 +136,7 @@ class EcogrowBenchmark:
         )
 
         if optimizer is None:
-            optimizer = torch.optim.AdamW(prompt_learner.parameters(), lr=lr)
+            optimizer = torch.optim.AdamW(trainer.parameters(), lr=lr)
 
         logging.info(
             "Starting fine-tuning for family '%s' | epochs=%d batch_size=%d",
@@ -165,7 +164,7 @@ class EcogrowBenchmark:
                 xb = xb.to(trainer.device)
                 yb = yb.to(trainer.device)
                 with torch.no_grad():
-                    logits = trainer.detector.logits(xb)
+                    logits = trainer.logits(xb)
                 pred_idx = logits.argmax(dim=-1)
 
                 eval_loss += F.cross_entropy(logits, yb, reduction="sum").item()
@@ -183,7 +182,7 @@ class EcogrowBenchmark:
             "train_samples": len(train_loader.dataset),
             "eval_samples": len(eval_loader.dataset) if eval_loader is not None else 0,
             "test_samples": len(test_data),
-            "temperature": trainer.temperature,
+            "temperature": getattr(trainer, "temperature", None),
         }
 
         if eval_metrics is not None:

@@ -1,40 +1,135 @@
 {
-    "Araceae": {
-      "Healthy": [
-        "Araceae leaf with healthy appearance, uniform emerald green color, smooth glossy texture, firm turgid tissue, no visible damage.",
-        "vibrant emerald green color, glossy smooth surface, firm turgid texture, no spots or discoloration."
-      ],
-      "Bacterial_wilt_disease": [
-        "Araceae leaf showing symptoms of bacterial wilt, drooping soft tissue, water-soaked dark veins, uneven yellowing areas.",
-        "drooping limp blade, dark water-soaked streaks along veins, uneven yellowing."
-      ],
-      "Manganese_Toxicity": [
-        "Araceae leaf expressing manganese toxicity, black necrotic specks between veins, interveinal chlorosis, dull faded texture.",
-        "yellow-green interveinal blotches, scattered black pin-point spots, dull faded surface, reduced gloss."
-      ]
-    },
-  
-    "Asparagaceae": {
-      "Healthy": [
-        "sansevieria leaf in healthy condition, upright rigid blade, vivid green banding pattern, glossy waxy surface, intact margins.",
-        "upright rigid blade, crisp dark-light variegation, glossy waxy texture, intact edges."
-      ],
-      "Anthracnose": [
-        "sansevieria leaf affected by anthracnose, dark sunken spots with pale halos, dry rough centers along mid-blade.",
-        "dark sunken lesions with pale halos, rough dry centers, scattered mid-blade spots."
-      ],
-      "Leaf_Withering": [
-        "sansevieria leaf undergoing withering, drooping shape, longitudinal wrinkles, dull green color, loss of rigidity.",
-        "drooping curved blade, longitudinal wrinkles, muted dull green tone, matte dehydrated surface."
-      ],
-      "Fungal_leaf_spot": [
-        "spider plant leaf showing fungal leaf spot, brown circular lesions with yellow halos, dry rough centers on green tissue.",
-        "multiple brown circular spots with yellow halos, rough dry centers, green tissue between lesions."
-      ],
-      "Leaf_Tip_Necrosis": [
-        "spider plant leaf with tip necrosis, brown desiccated apex, brittle dry margins, sharp contrast with green base.",
-        "brown desiccated tip, sharp transition to green base, curled brittle edges, matte texture."
-      ]
-    }
+  "Aloe": {
+    "Aloe_Healthy": [
+      "uniform vibrant green; glossy smooth surface; firm turgid tissue; intact margins; no spots or discoloration",
+      "Healthy Aloe vera leaf with uniform green color, glossy surface, firm texture, and intact margins."
+    ],
+    "Aloe_Anthracnose": [
+      "dark sunken lesions with pale halos; rough dry centers; scattered along lamina; irregular margins",
+      "Aloe vera leaf affected by anthracnose, showing dark sunken lesions with pale halos and rough centers scattered across the blade."
+    ],
+    "Aloe_Leaf_Spot": [
+      "brown circular to oval spots; yellow halos; concentric rings; dry necrotic centers",
+      "Aloe vera leaf with leaf spot disease, featuring brown circular lesions with yellow halos and dry necrotic centers."
+    ],
+    "Aloe_Rust": [
+      "orange powdery pustules; pinpoint uredinia on undersides; yellowing around lesions",
+      "Aloe vera leaf showing rust, with orange powdery pustules on the undersides and yellow halos on the upper surface."
+    ],
+    "Aloe_Sunburn": [
+      "bleached whitish patches; scorched margins; tan necrotic areas; rough dry surface",
+      "Aloe vera leaf exhibiting sunburn, with bleached patches, scorched edges, and tan necrotic areas."
+    ]
+  },
+
+  "Chrysanthemum": {
+    "Chrysanthemum_Healthy": [
+      "vivid green lamina; smooth turgid texture; crisp serrated margins; no lesions",
+      "Healthy chrysanthemum leaf with vivid green color, firm texture, and no visible lesions."
+    ],
+    "Chrysanthemum_Bacterial_Leaf_Spot": [
+      "water-soaked angular spots; brown centers; yellow halos; vein-limited lesions",
+      "Chrysanthemum leaf with bacterial leaf spot, showing water-soaked angular lesions that turn brown with yellow halos and are limited by veins."
+    ],
+    "Chrysanthemum_Septoria_Leaf_Spot": [
+      "small dark spots with gray centers; well-defined dark borders; tiny black pycnidia",
+      "Chrysanthemum leaf affected by Septoria leaf spot, with small dark lesions, gray centers, and distinct dark margins often containing black pycnidia."
+    ]
+  },
+
+  "Hibiscus": {
+    "Hibiscus_Healthy": [
+      "uniform glossy green; smooth waxy surface; firm turgor; intact margins",
+      "Healthy hibiscus leaf with glossy green surface, firm texture, and intact edges."
+    ],
+    "Hibiscus_Blight": [
+      "rapid wilting; water-soaked patches; darkening along veins; dieback tendencies",
+      "Hibiscus leaf showing blight, with water-soaked lesions, vein darkening, and rapid wilting of tissue."
+    ],
+    "Hibiscus_Necrosis": [
+      "dark brown to black necrotic patches; sharp margins; brittle dry texture",
+      "Hibiscus leaf with necrosis, presenting dark dead tissue with sharp borders and a brittle, dry surface."
+    ],
+    "Hibiscus_Scorch": [
+      "marginal browning; interveinal yellowing near edges; curled crisp margins",
+      "Hibiscus leaf exhibiting scorch, with marginal browning, interveinal chlorosis near the edges, and curled, crisp margins."
+    ]
+  },
+
+  "Money Plant": {
+    "Money_Plaant_Healthy": [
+      "vivid green; smooth waxy sheen; firm turgid tissue; intact heart-shaped margins",
+      "Healthy money plant leaf with vivid green color, waxy surface, and intact margins."
+    ],
+    "Money_Plant_Bacterial_Wilt": [
+      "sudden limpness; water-soaked veins; dark vascular streaks; generalized wilt",
+      "Money plant leaf showing bacterial wilt, with water-soaked venation, dark vascular streaks, and overall wilting."
+    ],
+    "Money_Plant_Chlorosis": [
+      "interveinal yellowing; veins remain green; diffuse pale lamina",
+      "Money plant leaf with chlorosis, characterized by interveinal yellowing while veins remain green."
+    ],
+    "Money_Plant_Manganese_Toxicity": [
+      "interveinal chlorosis; numerous brown-black specks; dull reduced gloss; slight puckering",
+      "Money plant leaf expressing manganese toxicity, with interveinal chlorosis, scattered brown to black specks, and a dullened surface."
+    ]
+  },
+
+  "Rose": {
+    "Rose_Healthy": [
+      "deep green leaflets; smooth slightly glossy surface; intact serrations; no lesions",
+      "Healthy rose leaf with deep green, slightly glossy leaflets and intact serrated edges."
+    ],
+    "Rose_Black_Spot": [
+      "black circular spots; feathery margins; yellow halos; tendency to defoliate",
+      "Rose leaf affected by black spot, showing black circular lesions with feathery margins and yellow halos."
+    ],
+    "Rose_Downy_Mildew": [
+      "purple-red angular blotches; vein-limited lesions; gray downy growth underside",
+      "Rose leaf with downy mildew, presenting purple to red angular lesions limited by veins and gray downy growth on the underside."
+    ],
+    "Rose_Insect_Damage": [
+      "irregular chew holes; notched margins; stippling; occasional frass",
+      "Rose leaf with insect damage, including irregular chewing holes, notched edges, and stippling."
+    ],
+    "Rose_Mosaic_Virus": [
+      "yellow mosaic and mottling; vein clearing; distorted leaflet shape",
+      "Rose leaf showing mosaic virus symptoms, with yellow mottling, vein clearing, and mild leaflet distortion."
+    ],
+    "Rose_Powdery_Mildew": [
+      "white powdery coating; curled distorted leaflets; reduced gloss",
+      "Rose leaf affected by powdery mildew, covered by a white powdery growth and slight curling of the leaflets."
+    ],
+    "Rose_Rust": [
+      "orange-brown pustules underside; yellow spots above; powdery spore masses",
+      "Rose leaf with rust, showing orange-brown powdery pustules on the undersides and corresponding yellow spots above."
+    ],
+    "Rose_Yellow_Mosaic_Virus": [
+      "bright yellow mosaic patterns; chlorotic patches; mild deformation",
+      "Rose leaf expressing yellow mosaic virus, with bright yellow mosaic patterns and chlorotic patches."
+    ]
+  },
+
+  "Turmeric": {
+    "Turmeric_Healthy": [
+      "uniform lush green; smooth broad lamina; firm texture; no lesions",
+      "Healthy turmeric leaf with lush green color, broad smooth lamina, and no visible lesions."
+    ],
+    "Turmeric_Aphid_Infestation": [
+      "clusters of small soft-bodied insects; sticky honeydew; leaf curling; sooty mold risk",
+      "Turmeric leaf with aphid infestation, showing clusters of small insects, honeydew deposits, and slight curling that may promote sooty mold."
+    ],
+    "Turmeric_Blotch": [
+      "elongated brown blotches; grayish centers; yellow halos; coalescing lesions",
+      "Turmeric leaf affected by blotch disease, with elongated brown lesions, gray centers, and yellow halos that may coalesce."
+    ],
+    "Turmeric_Leaf_Necrosis": [
+      "apical tip burn; marginal necrosis; dark brittle tissue; sharp transition line",
+      "Turmeric leaf exhibiting leaf necrosis, with tip burn, marginal browning, and brittle dark tissue."
+    ],
+    "Turmeric_Leaf_Spot": [
+      "small brown circular to irregular spots; chlorotic halos; merging into larger patches",
+      "Turmeric leaf with leaf spot disease, presenting small brown lesions with chlorotic halos that can merge into larger patches."
+    ]
   }
-  
+}
