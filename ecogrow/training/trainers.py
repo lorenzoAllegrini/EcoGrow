@@ -8,8 +8,8 @@ from typing import Callable, Dict, List, Optional, Sequence
 import torch
 import torch.nn.functional as F
 
-from ecogrow.models.open_clip_wrapper import OpenClipWrapper
-from .prompt_learners import PromptLearnerOpenCLIP
+from ecogrow.models.open_clip_wrapper import FamilyDetector
+from .prompt_learners import ClipPromptLearner
 
 @dataclass
 class EpochMetrics:
@@ -55,24 +55,35 @@ def delta_report(model, before, prefix=""):
     return "\n".join(lines)
 
 
-class PromptTuningTrainer:
+class ClipPromptEngine:
     def __init__(
         self,
-        clip_wrapper: OpenClipWrapper,
+        clip_model: torch.nn.Module,
+        text_encoder: torch.nn.Module,
+        preprocess,
         device: torch.device,
-        prompt_learner: PromptLearnerOpenCLIP,
+        *,
+        class_names: Sequence[str],
+        family_name: str,
+        prompt_learner: ClipPromptLearner,
         temperature: float = 0.01,
-        use_amp: bool = True,
     ) -> None:
-        
-        self.clip_wrapper = clip_wrapper
-        self.clip_model = clip_wrapper.model
-        self.text_encoder = clip_wrapper.text_encoder
         self.prompt_learner = prompt_learner
         self.device = device
         self.temperature = temperature
-        self.use_amp = use_amp and torch.cuda.is_available()
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.preprocess_fn = preprocess
+
+        self.detector = FamilyDetector(
+            name=family_name,
+            classes=class_names,
+            temperature=temperature,
+            source=None,
+            clip_model=clip_model,
+            text_encoder=text_encoder,
+            preprocess=preprocess,
+            device=device,
+            prompt_learner=prompt_learner,
+        )
 
     def fit(
         self,
@@ -112,7 +123,8 @@ class PromptTuningTrainer:
         grad_clip: Optional[float],
     ) -> EpochMetrics:
 
-        self.prompt_learner.train()
+        prompt_module = self.prompt_learner
+        prompt_module.train()
         total_loss = 0.0
         correct = 0
         total = 0
@@ -123,16 +135,7 @@ class PromptTuningTrainer:
 
             optimizer.zero_grad()
 
-            # ============ FORWARD (immagini congelate) ============
-            with torch.no_grad():
-                image_features = self.clip_model.encode_image(xb)
-            image_features = F.normalize(image_features, dim=-1)
-
-            prompts_embeds, tokenized_prompts = self.prompt_learner()
-            text_features = self.text_encoder(prompts_embeds, tokenized_prompts)
-            text_features = F.normalize(text_features, dim=-1)
-
-            logits = (image_features @ text_features.t()) / self.temperature
+            logits = self.detector.logits(xb, require_grad=True)
             loss = F.cross_entropy(logits, yb)
 
             # ============ BACKWARD ============
@@ -140,7 +143,7 @@ class PromptTuningTrainer:
 
             # Failsafe: se gradienti hanno NaN/Inf, salta lo step
             bad_grad = False
-            for p in self.prompt_learner.parameters():
+            for p in prompt_module.parameters():
                 if p.grad is None:
                     continue
                 if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
@@ -164,51 +167,3 @@ class PromptTuningTrainer:
         acc = correct / max(total, 1)
         return EpochMetrics(loss=avg_loss, accuracy=acc)
 
-
-    def predict(
-        self,
-        images: torch.Tensor,
-        *,
-        class_names: Optional[Sequence[str]] = None,
-        temperature: Optional[float] = None,
-    ) -> Dict[str, torch.Tensor | List[str]]:
-        """
-        Esegue la predizione per un batch di immagini usando i prompt appresi.
-
-        Args:
-            images: tensore batch in formato compatibile con la preprocess pipeline di CLIP.
-            class_names: etichette opzionali (stessa lunghezza delle classi) da includere nell'output.
-            temperature: override opzionale della temperatura usata per normalizzare i logits.
-
-        Returns:
-            Dizionario con logits, probabilità, indici predetti e, se fornito, le etichette corrispondenti.
-        """
-        was_training = self.prompt_learner.training
-        self.prompt_learner.eval()
-
-        with torch.no_grad():
-            prompts_embeds, tokenized_prompts = self.prompt_learner()
-            text_features = self.text_encoder(prompts_embeds, tokenized_prompts)
-            text_features = F.normalize(text_features, dim=-1)
-
-            images = images.to(self.device)
-            image_features = self.clip_model.encode_image(images)
-            image_features = F.normalize(image_features, dim=-1)
-
-            temp = temperature if temperature is not None else self.temperature
-            logits = (image_features @ text_features.t()) / temp
-            probs = logits.softmax(dim=-1)
-
-        if was_training:
-            self.prompt_learner.train()
-
-        pred_indices = probs.argmax(dim=-1)
-        result: Dict[str, torch.Tensor | List[str]] = {
-            "logits": logits,
-            "probs": probs,
-            "pred_indices": pred_indices,
-        }
-        if class_names is not None:
-            result["pred_labels"] = [class_names[i] for i in pred_indices.cpu().tolist()]
-
-        return result

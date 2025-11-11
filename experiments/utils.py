@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List, Sequence, Dict
+from typing import Iterable, List, Sequence, Dict, Callable
 from pathlib import Path
 import torch
 import torch.nn.functional as F
-from ecogrow.models.open_clip_wrapper import OpenClipWrapper, TextEncoderOpenCLIP
-from ecogrow.training.prompt_learners import PromptLearnerOpenCLIP
+from ecogrow.models.open_clip_wrapper import TextEncoderOpenCLIP
+from ecogrow.training.prompt_learners import ClipPromptLearner
 
 @torch.no_grad()
 def compute_init_ctx(
     n_ctx: int,
-    clip_wrapper: OpenClipWrapper,
+    clip_model: torch.nn.Module,
+    tokenizer: Callable[[Sequence[str]], torch.Tensor],
     class_prompts: Sequence[str],
     alpha_seed: float = 0.0,
     seed_text: str = "a photo of a",
@@ -26,7 +27,8 @@ def compute_init_ctx(
 
     Args:
         n_ctx: numero di token di contesto da usare.
-        clip_wrapper: wrapper OpenCLIP con modello + tokenizer.
+        clip_model: modello CLIP già caricato.
+        tokenizer: tokenizer compatibile con CLIP.
         class_prompts: lista di prompt, uno per classe.
         alpha_seed: peso di blending con il seed_text (0 = disattivo).
         seed_text: prompt di riferimento per il blending.
@@ -34,12 +36,6 @@ def compute_init_ctx(
     Returns:
         torch.Tensor: tensore [n_ctx, D] con il contesto iniziale.
     """
-    if not isinstance(clip_wrapper, OpenClipWrapper):
-        raise TypeError("clip_wrapper deve essere un OpenClipWrapper.")
-
-    clip_model = clip_wrapper.model
-    tokenizer = clip_wrapper.tokenizer
-
     device = next(clip_model.parameters()).device
     dtype = next(clip_model.parameters()).dtype
 
@@ -62,7 +58,8 @@ def compute_init_ctx(
 @torch.no_grad()
 def compute_class_ctx(
     n_ctx: int,
-    clip_wrapper: OpenClipWrapper,
+    clip_model: torch.nn.Module,
+    tokenizer: Callable[[Sequence[str]], torch.Tensor],
     prompts_per_class: Sequence[Sequence[str]],
     alpha_seed: float = 0.0,
     seed_text: str = "a photo of a",
@@ -74,11 +71,6 @@ def compute_class_ctx(
     prompts_per_class: lista di liste; ogni elemento è l'elenco di prompt testuali
                        associati alla classe corrispondente.
     """
-    if not isinstance(clip_wrapper, OpenClipWrapper):
-        raise TypeError("clip_wrapper deve essere un OpenClipWrapper.")
-
-    clip_model = clip_wrapper.model
-    tokenizer = clip_wrapper.tokenizer
     device = next(clip_model.parameters()).device
     dtype = next(clip_model.parameters()).dtype
 
@@ -106,7 +98,7 @@ def export_family_embeddings(
     out_path: Path,
     family_name: str,
     class_order: Iterable[str],
-    prompt_learner: PromptLearnerOpenCLIP,
+    prompt_learner: ClipPromptLearner,
     text_encoder: TextEncoderOpenCLIP,
     temperature: float,
 ) -> Dict:
