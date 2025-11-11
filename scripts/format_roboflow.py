@@ -8,6 +8,13 @@ import sys
 from pathlib import Path
 
 
+
+import kagglehub
+
+# Download latest version
+path = kagglehub.dataset_download("aditisalvi04/indoor-plant-disease-dataset")
+
+print("Path to dataset files:", path)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -21,7 +28,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source",
-        default=str(PROJECT_ROOT / "Indoor"),
+        default=str("/home/marco/.cache/kagglehub/datasets/aditisalvi04/indoor-plant-disease-dataset/versions/1/Final Dataset"),
         help="Percorso della directory Roboflow da cui leggere i dati (default: ./roboflow_data).",
     )
     parser.add_argument(

@@ -5,91 +5,74 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List
 
 import torch
 import torch.nn.functional as F
 
-# Avoid numba cache issues when running via Poetry.
 os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
 
-# Ensure project root is on PYTHONPATH when running as a script.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, FamilyAdaptedClipDetector, FamilyClipDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyAdaptedClipDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
     segment_plant_rgba,
 )
-from ecogrow.training.prompt_learners import ClipPromptLearner
-from ecogrow.training.trainers import ClipPromptEngine
+from ecogrow.training.trainers import ClipFineTuneEngine
 from ecogrow.data.plant_data import PlantData, make_segment_fn
-from experiments.utils import compute_init_ctx, export_family_embeddings
-
 
 
 @dataclass(frozen=True)
 class Config:
     dataset_path: Path
-    embeddings_dir: Optional[Path]
     prompts_config: Path
     run_id: str
     exp_dir: Path
     epochs: int
     batch_size: int
-    temperature: float
     perc_eval: float
     lr: float
+    classifier_dropout: float
 
 
 def _parse_args() -> Config:
-    parser = argparse.ArgumentParser(description="EcoGrow CLIP benchmark experiment")
+    parser = argparse.ArgumentParser(description="EcoGrow CLIP fine-tuning experiment")
     parser.add_argument(
         "--dataset-path",
         default="datasets",
-        help="Percorso alla directory del dataset (es. data/Indoor-Plant-disease-dataset-1)",
-    )
-    parser.add_argument(
-        "--embeddings-dir",
-        default="experiment/clip_prompts",
-        help="Directory in cui salvare gli embedding generati (opzionale)",
+        help="Percorso della directory del dataset (es. data/Indoor-Plant-disease-dataset-1)",
     )
     parser.add_argument(
         "--prompts-config",
         default="experiments/prompts.json",
-        help="File JSON con la configurazione dei prompt",
+        help="File JSON con la configurazione delle famiglie e relative classi",
     )
     parser.add_argument(
         "--run-id",
         default=None,
-        help="Identificativo della run; se non specificato viene derivato dal nome del file di prompt.",
+        help="Identificativo della run; se non specificato viene derivato dal file di prompt.",
     )
     parser.add_argument(
         "--exp-dir",
         default="experiments",
-        help="Directory principale dove salvare i risultati del benchmark.",
+        help="Directory principale dove salvare i risultati.",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=10,
+        default=1,
         help="Numero di epoche di fine-tuning per ciascuna famiglia.",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=16,
+        default=8,
         help="Batch size utilizzata durante il fine-tuning.",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.07,
-        help="Temperatura da usare durante la similarità immagine-testo.",
     )
     parser.add_argument(
         "--perc-eval",
@@ -100,19 +83,20 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--lr",
         type=float,
-        default=5e-3,
-        help="Learning rate del prompt tuner (AdamW).",
+        default=5e-6,
+        help="Learning rate per l'ottimizzatore AdamW.",
+    )
+    parser.add_argument(
+        "--classifier-dropout",
+        type=float,
+        default=0.1,
+        help="Dropout applicato prima del classificatore lineare.",
     )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
     if not dataset_path.is_dir():
         raise FileNotFoundError(f"Dataset path '{dataset_path}' non esiste o non è una directory.")
-
-    embeddings_dir = None
-    if args.embeddings_dir:
-        embeddings_dir = Path(args.embeddings_dir).expanduser().resolve()
-        embeddings_dir.mkdir(parents=True, exist_ok=True)
 
     prompts_path = Path(args.prompts_config).expanduser().resolve()
     if not prompts_path.is_file():
@@ -121,23 +105,23 @@ def _parse_args() -> Config:
     exp_dir = Path(args.exp_dir).expanduser().resolve()
     exp_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.run_id:
-        run_id = args.run_id
-    else:
-        run_id = f"clip_{prompts_path.stem}"
+    run_id = args.run_id or f"clip_finetune_{prompts_path.stem}"
 
     return Config(
         dataset_path=dataset_path,
-        embeddings_dir=embeddings_dir,
         prompts_config=prompts_path,
         run_id=run_id,
         exp_dir=exp_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
-        temperature=args.temperature,
         perc_eval=max(0.0, float(args.perc_eval)),
         lr=args.lr,
+        classifier_dropout=max(0.0, float(args.classifier_dropout)),
     )
+
+
+def _clone_state_dict(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
 def main() -> Dict[str, Dict[str, object]]:
@@ -146,12 +130,13 @@ def main() -> Dict[str, Dict[str, object]]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = "ViT-B-32"
     pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
-    clip_model, preprocess, tokenizer, text_encoder = init_open_clip(
+    clip_model, preprocess, _, _ = init_open_clip(
         model_name=model_name,
         pretrained_tag=pretrained_tag,
         device=device,
     )
-    freeze_open_clip_backbone(clip_model)
+
+    base_state = _clone_state_dict(clip_model)
 
     benchmark = EcogrowBenchmark(
         run_id=config.run_id,
@@ -168,44 +153,27 @@ def main() -> Dict[str, Dict[str, object]]:
     with open(config.prompts_config, "r", encoding="utf-8") as f:
         prompt_config = json.load(f)
 
-
     family_results: Dict[str, Dict[str, object]] = {}
     summary_rows: List[Dict[str, object]] = []
 
     num_families = len(prompt_config)
-    index_entries: List[Dict[str, object]] = []
     for i, (family_name, family_cfg) in enumerate(prompt_config.items(), start=1):
         print(f"[{i}/{num_families}] Family: {family_name}")
 
-        class_prompts = [prompts[1] for _, prompts in family_cfg.items()]
+        clip_model.load_state_dict(base_state, strict=True)
+        clip_model.to(device)
+
         classnames = [disease for disease in family_cfg.keys()]
-
-        ctx_init = compute_init_ctx(
-            n_ctx=16,
-            clip_model=clip_model,
-            tokenizer=tokenizer,
-            class_prompts=class_prompts,
-        )
-
-        prompt_learner = ClipPromptLearner(
-            classnames,
-            clip_model,
-            ctx_vectors=ctx_init,
-            model_name=model_name,
-        ).to(device)
-
-        family_detector = FamilyClipDetector(
+        family_detector = FamilyAdaptedClipDetector(
             name=family_name,
-            temperature=config.temperature,
+            classes=classnames,
             clip_model=clip_model,
-            text_encoder=text_encoder,
             preprocess=preprocess,
             device=device,
-            prompt_learner=prompt_learner,
+            feature_dropout=config.classifier_dropout,
         )
-        trainer = ClipPromptEngine(
+        trainer = ClipFineTuneEngine(
             family_detector=family_detector,
-            prompt_learner=prompt_learner,
         )
 
         fit_args = {
@@ -235,6 +203,7 @@ def main() -> Dict[str, Dict[str, object]]:
             batch_size=config.batch_size,
             shuffle=False,
         )
+
         test_loss = 0.0
         test_correct = 0
         test_total = 0
@@ -247,34 +216,15 @@ def main() -> Dict[str, Dict[str, object]]:
             test_loss += F.cross_entropy(logits, yb, reduction="sum").item()
             test_correct += (preds == yb).sum().item()
             test_total += yb.size(0)
+
         test_metrics = {
             "loss": test_loss / max(test_total, 1),
             "accuracy": test_correct / max(test_total, 1),
         }
         result["test_metrics"] = test_metrics
 
-        if config.embeddings_dir is not None:
-            family_file = config.embeddings_dir / f"{family_name}.pt"
-            exported = export_family_embeddings(
-                family_file,
-                family_name,
-                classnames,
-                prompt_learner,
-                text_encoder,
-                temperature=trainer.temperature,
-            )
-            index_entries.append(
-                {
-                    "family": family_name,
-                    "classes": list(exported["classes"]),
-                    "file": family_file.name,
-                    "temperature": exported["temperature"],
-                }
-            )
-
         family_results[family_name] = result
 
-        test_metrics = result["test_metrics"]
         eval_metrics = result.get("eval_metrics")
         summary_rows.append(
             {
@@ -286,7 +236,7 @@ def main() -> Dict[str, Dict[str, object]]:
                 "eval_accuracy": eval_metrics["accuracy"] if eval_metrics else None,
                 "test_loss": test_metrics["loss"],
                 "test_accuracy": test_metrics["accuracy"],
-                "temperature": result["temperature"],
+                "temperature": result.get("temperature"),
             }
         )
 
@@ -299,23 +249,10 @@ def main() -> Dict[str, Dict[str, object]]:
             writer.writerows(summary_rows)
         print(f"Results saved to {csv_path}")
 
-        test_accs = [
-            row["test_accuracy"] for row in summary_rows if row["test_accuracy"] is not None
-        ]
+        test_accs = [row["test_accuracy"] for row in summary_rows if row["test_accuracy"] is not None]
         if test_accs:
             avg_acc = sum(test_accs) / len(test_accs)
             print(f"Average test accuracy: {avg_acc:.3f}")
-
-    if config.embeddings_dir is not None and index_entries:
-        index_payload = {
-            "clip_model": model_name,
-            "pretrained": pretrained_tag,
-            "families": index_entries,
-        }
-        index_path = config.embeddings_dir / "index.json"
-        with open(index_path, "w", encoding="utf-8") as f:
-            json.dump(index_payload, f, indent=2)
-        print(f"Embeddings index saved to {index_path}")
 
     return family_results
 
