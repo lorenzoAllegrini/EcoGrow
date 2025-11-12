@@ -6,10 +6,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
-
+from torch import nn
 import torch
 import torch.nn.functional as F
-from peft import LoraConfig, LoraModel
+from peft import LoraConfig, get_peft_model
 
 os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
 
@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyClipDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyAdaptedClipDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -26,7 +26,7 @@ from ecogrow.preprocessing.image_segmentator import (
 )
 from ecogrow.training.trainers import ClipFineTuneEngine
 from ecogrow.data.plant_data import PlantData, make_segment_fn
-
+from utils import list_leaf_modules
 
 @dataclass(frozen=True)
 class Config:
@@ -50,7 +50,7 @@ def _parse_args() -> Config:
     )
     parser.add_argument(
         "--prompts-config",
-        default="experiments/prompts.json",
+        default="experiments/prompts_2.json",
         help="File JSON con la configurazione delle famiglie e relative classi",
     )
     parser.add_argument(
@@ -136,18 +136,17 @@ def main() -> Dict[str, Dict[str, object]]:
         pretrained_tag=pretrained_tag,
         device=device,
     )
-    
+
     lora_config = LoraConfig(
         r=8,              
         lora_alpha=16,     
         lora_dropout=0.05,
-        target_modules=["qkv", "proj", "fc1", "fc2"], 
+        target_modules=['out_proj', 'c_fc', 'c_proj'], 
         bias="none",
-        task_type="FEATURE_EXTRACTION"
+        task_type="FEATURE_EXTRACTION",
     )
-    
-    clip_model = LoraModel(clip_model.visual, lora_config, adapter_name="default")
-    
+    clip_model.visual = get_peft_model(clip_model.visual, lora_config)
+
     base_state = _clone_state_dict(clip_model)
 
     benchmark = EcogrowBenchmark(
@@ -176,14 +175,13 @@ def main() -> Dict[str, Dict[str, object]]:
         clip_model.to(device)
 
         classnames = [disease for disease in family_cfg.keys()]
-        family_detector = FamilyClipDetector(
+        family_detector = FamilyAdaptedClipDetector(
             name=family_name,
             classes=classnames,
             clip_model=clip_model,
             preprocess=preprocess,
             device=device,
             feature_dropout=config.classifier_dropout,
-            text_features=prompt_config
         )
         trainer = ClipFineTuneEngine(
             family_detector=family_detector,
