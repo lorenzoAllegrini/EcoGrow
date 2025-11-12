@@ -1,6 +1,10 @@
 /__pycache__
 /Indoor-Plant-disease-dataset-1
 /venv
+/.venv
 /artifacts
 /docs
 /__pycache__
+/datasets
+*/__pycache__*
+/aloe
