@@ -19,7 +19,7 @@ DEFAULT_SPECIES = {
     "turmeric",
     "snake_plant",
     "spider_plant",
-    "aloe",
+    #"aloe",
     "cactus",
 }
 
@@ -181,6 +181,7 @@ class PlantData(Dataset):
 
     def _resolve_family_dir(self) -> Path:
         split_dir = self.root / self.split
+        print(split_dir)
         if not split_dir.is_dir():
             raise FileNotFoundError(
                 f"Split '{self.split}' non presente in '{self.root}'."

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Any
 
 import torch
 import torch.nn as nn
@@ -65,10 +65,11 @@ class ClipPromptEngine:
         *,
         prompt_learner: ClipPromptLearner,
         family_detector:FamilyClipDetector,
+        preprocess: Any,
     ) -> None:
         self.prompt_learner = prompt_learner
         self.device = device
-
+        self.preprocess = preprocess
         self.detector = family_detector
 
     def parameters(self):
@@ -107,7 +108,6 @@ class ClipPromptEngine:
                 log_fn(msg)
 
             history.append({"train": train_metrics})
-
         return history
 
     def _run_train_epoch(
@@ -124,18 +124,18 @@ class ClipPromptEngine:
         total = 0
 
         for step, (xb, yb) in enumerate(loader, start=1):
+            prompts, _ = prompt_module()
+
             xb = xb.to(self.device)
             yb = yb.to(self.device)
 
             optimizer.zero_grad()
 
-            logits = self.detector.logits(xb, require_grad=True)
+            logits = self.detector.logits(xb, require_grad=True, prompts_embeds=prompts)
             loss = F.cross_entropy(logits, yb)
 
-            # ============ BACKWARD ============
             loss.backward()
 
-            # Failsafe: se gradienti hanno NaN/Inf, salta lo step
             bad_grad = False
             for p in prompt_module.parameters():
                 if p.grad is None:
@@ -160,8 +160,27 @@ class ClipPromptEngine:
         avg_loss = total_loss / max(total, 1)
         acc = correct / max(total, 1)
         return EpochMetrics(loss=avg_loss, accuracy=acc)
+    
+    def eval(self, eval_loader):
+        eval_total = 0
+        eval_correct = 0
+        eval_loss = 0.0
+        prompts, _ = self.prompt_learner()
+        for xb, yb in eval_loader:
+            xb = xb.to(self.device)
+            yb = yb.to(self.device)
+            with torch.no_grad():
+                logits = self.detector.logits(xb, prompts_embeds=prompts)
+            pred_idx = logits.argmax(dim=-1)
 
+            eval_loss += F.cross_entropy(logits, yb, reduction="sum").item()
+            eval_correct += (pred_idx == yb).sum().item()
+            eval_total += yb.size(0)
 
+        eval_metrics = EpochMetrics(
+            loss=eval_loss / max(eval_total, 1),
+            accuracy=eval_correct / max(eval_total, 1),
+        ) 
 
 
 
@@ -176,9 +195,17 @@ class ClipFineTuneEngine:
     ) -> None:
         self.detector = family_detector
         self.device = family_detector.device
-        self.preprocess_fn = family_detector.preprocess
+        self.preprocess = family_detector.preprocess
         self.family_name = family_detector.name
         self.temperature = family_detector.temperature
+
+    def parameters(self):
+        """Expose trainable parameters for optimizer construction."""
+        return self.detector.parameters()
+
+    def logits(self, images: torch.Tensor, *, require_grad: bool = False) -> torch.Tensor:
+        """Proxy to detector logits for evaluation loops."""
+        return self.detector.logits(images, require_grad=require_grad)
 
     def fit(
         self,

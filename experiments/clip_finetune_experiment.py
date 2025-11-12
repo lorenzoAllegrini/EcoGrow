@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
 from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyAdaptedClipDetector
+from ecogrow.models.mobile_clip import init_mobile_clip
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -41,7 +42,13 @@ class Config:
 
 
 def _parse_args() -> Config:
-    parser = argparse.ArgumentParser(description="EcoGrow CLIP fine-tuning experiment")
+    parser = argparse.ArgumentParser(description="EcoGrow CLIP/Mobile fine-tuning experiment")
+    parser.add_argument(
+        "--backend",
+        choices=["openclip", "mobile"],
+        default="openclip",
+        help="Seleziona il backend del modello immagine (openclip o mobile)",
+    )
     parser.add_argument(
         "--dataset-path",
         default="datasets",
@@ -128,13 +135,24 @@ def main() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_name = "ViT-B-32"
-    pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
-    clip_model, preprocess, _, _ = init_open_clip(
-        model_name=model_name,
-        pretrained_tag=pretrained_tag,
-        device=device,
-    )
+    backend = os.environ.get("ECOGROW_BACKEND", args.backend)
+    if backend == "openclip":
+        model_name = "ViT-B-32"
+        pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
+        clip_model, preprocess, _, _ = init_open_clip(
+            model_name=model_name,
+            pretrained_tag=pretrained_tag,
+            device=device,
+        )
+    else:
+        # Mobile backend: only image encoder is used; fine-tune with linear head
+        model_name = "mobilenet_v3_large"
+        clip_model, preprocess, _, _ = init_mobile_clip(
+            model_name=model_name,
+            pretrained=True,
+            device=device,
+            embed_dim=512,
+        )
 
     base_state = _clone_state_dict(clip_model)
 

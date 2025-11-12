@@ -88,10 +88,9 @@ class EcogrowBenchmark:
             Dict[str, Any]: collected metrics and bookkeeping for the run.
         """
         os.makedirs(self.run_dir, exist_ok=True)
-
         fit_args = dict(fit_predictor_args or {})
 
-        preprocess = trainer.preprocess_fn
+        preprocess = trainer.preprocess
 
         batch_size = fit_args.pop("batch_size", 16)
         epochs = fit_args.pop("epochs", 10)
@@ -153,29 +152,11 @@ class EcogrowBenchmark:
             grad_clip=grad_clip,
             log_fn=log_fn,
         )
-
         eval_metrics: Optional[EpochMetrics] = None
         if eval_loader is not None:
-            eval_total = 0
-            eval_correct = 0
-            eval_loss = 0.0
+            metrics = trainer.eval(eval_loader)
 
-            for xb, yb in eval_loader:
-                xb = xb.to(trainer.device)
-                yb = yb.to(trainer.device)
-                with torch.no_grad():
-                    logits = trainer.logits(xb)
-                pred_idx = logits.argmax(dim=-1)
-
-                eval_loss += F.cross_entropy(logits, yb, reduction="sum").item()
-                eval_correct += (pred_idx == yb).sum().item()
-                eval_total += yb.size(0)
-
-            eval_metrics = EpochMetrics(
-                loss=eval_loss / max(eval_total, 1),
-                accuracy=eval_correct / max(eval_total, 1),
-            )
-
+        print(metrics)
         results: Dict[str, Any] = {
             "family_id": family_id,
             "train_history": history,

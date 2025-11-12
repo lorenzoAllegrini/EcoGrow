@@ -12,7 +12,7 @@ from ecogrow.training.prompt_learners import ClipPromptLearner
 @torch.no_grad()
 def compute_init_ctx(
     n_ctx: int,
-    clip_model: torch.nn.Module,
+    text_encoder: torch.nn.Module,
     tokenizer: Callable[[Sequence[str]], torch.Tensor],
     class_prompts: Sequence[str],
     alpha_seed: float = 0.0,
@@ -36,23 +36,23 @@ def compute_init_ctx(
     Returns:
         torch.Tensor: tensore [n_ctx, D] con il contesto iniziale.
     """
-    device = next(clip_model.parameters()).device
-    dtype = next(clip_model.parameters()).dtype
+    device = text_encoder.device
+    dtype = text_encoder.dtype
 
     prompts = [(p.strip() if p.strip().endswith(".") else p.strip() + ".") for p in class_prompts]
     if not prompts:
         raise ValueError("Provide at least one prompt (one per class).")
 
     tokens = torch.cat([tokenizer([p]) for p in prompts], dim=0).to(device)         # [C,L]
-    emb    = clip_model.token_embedding(tokens).type(dtype)                          # [C,L,D]
+    emb    = text_encoder.token_embedding(tokens).type(dtype)                          # [C,L,D]
     ctx    = emb[:, 1:1+n_ctx, :].mean(dim=0)                                        # [n_ctx,D]
 
     if alpha_seed > 0.0:
         seed_tok = tokenizer([seed_text]).to(device)
-        seed_emb = clip_model.token_embedding(seed_tok).type(dtype)[0, 1:1+n_ctx, :] # [n_ctx,D]
+        seed_emb = text_encoder.token_embedding(seed_tok).type(dtype)[0, 1:1+n_ctx, :] # [n_ctx,D]
         ctx = alpha_seed * seed_emb + (1.0 - alpha_seed) * ctx
 
-    return ctx  # shape: [n_ctx, D]
+    return ctx  
 
 
 @torch.no_grad()
@@ -116,6 +116,13 @@ def export_family_embeddings(
     torch.save(payload, out_path)
     return payload
 
+def set_leaf_modules(model):
+    leaves = []
+    for name, module in model.named_modules():
+        if len(list(module.children())) == 0:
+            leaves.append((name, module.__class__.__name__))
+    
+    return leaves
 
 
-__all__ = ["export_family_embeddings", "compute_init_ctx", "compute_class_ctx"]
+__all__ = ["export_family_embeddings", "compute_init_ctx", "compute_class_ctx", "list_leaf_modules"]

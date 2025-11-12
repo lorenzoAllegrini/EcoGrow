@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, FamilyAdaptedClipDetector, FamilyClipDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, FamilyClipDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -60,7 +60,7 @@ def _parse_args() -> Config:
     )
     parser.add_argument(
         "--prompts-config",
-        default="experiments/prompts.json",
+        default="experiments/prompts_2.json",
         help="File JSON con la configurazione dei prompt",
     )
     parser.add_argument(
@@ -144,8 +144,9 @@ def main() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_name = "ViT-B-32"
-    pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
+    model_name = "MobileCLIP-S2"
+    pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "/Users/lorenzoallegrini/.cache/huggingface/hub/models--pcuenq--MobileCLIP-S2/snapshots/6da8f9f1c7fa5ae89385ef86bfdee297d105e6f6/mobileclip_s2.pt")
+
     clip_model, preprocess, tokenizer, text_encoder = init_open_clip(
         model_name=model_name,
         pretrained_tag=pretrained_tag,
@@ -182,30 +183,33 @@ def main() -> Dict[str, Dict[str, object]]:
 
         ctx_init = compute_init_ctx(
             n_ctx=16,
-            clip_model=clip_model,
+            text_encoder=text_encoder,
             tokenizer=tokenizer,
             class_prompts=class_prompts,
         )
 
         prompt_learner = ClipPromptLearner(
-            classnames,
-            clip_model,
+            classnames=classnames,
+            text_encoder=text_encoder,
             ctx_vectors=ctx_init,
             model_name=model_name,
         ).to(device)
 
         family_detector = FamilyClipDetector(
             name=family_name,
+            classes=classnames,
             temperature=config.temperature,
             clip_model=clip_model,
             text_encoder=text_encoder,
-            preprocess=preprocess,
             device=device,
             prompt_learner=prompt_learner,
         )
+
         trainer = ClipPromptEngine(
             family_detector=family_detector,
             prompt_learner=prompt_learner,
+            device=device,
+            preprocess=preprocess
         )
 
         fit_args = {
@@ -261,7 +265,7 @@ def main() -> Dict[str, Dict[str, object]]:
                 classnames,
                 prompt_learner,
                 text_encoder,
-                temperature=trainer.temperature,
+                temperature=family_detector.temperature,
             )
             index_entries.append(
                 {

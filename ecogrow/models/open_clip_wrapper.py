@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from itertools import chain
-from typing import Callable, Tuple, List, Optional, Dict, Sequence, Iterable
+from typing import Callable, Tuple, List, Optional, Dict, Sequence, Iterable, Literal
 
 import open_clip
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
 
 def init_open_clip(
     model_name: str = "ViT-B-32",
@@ -17,9 +19,13 @@ def init_open_clip(
     Factory function that returns the raw OpenCLIP components required across the project.
     """
     device = torch.device(device)
+    extra = {}
+    if model_name.startswith("MobileCLIP-S"):
+        extra.update(dict(image_mean=(0,0,0), image_std=(1,1,1)))
     model, _, preprocess = open_clip.create_model_and_transforms(
         model_name,
         pretrained=pretrained_tag,
+        **extra
     )
     tokenizer = open_clip.get_tokenizer(model_name)
 
@@ -46,11 +52,23 @@ class TextEncoderOpenCLIP(nn.Module):
 
     def __init__(self, clip_model):
         super().__init__()
-        self.transformer = clip_model.transformer
-        self.positional_embedding = clip_model.positional_embedding  # [L, D]
-        self.ln_final = clip_model.ln_final
-        self.text_projection = clip_model.text_projection  # [D_out, D]
+        # rileva dove stanno i componenti testuali
+        if hasattr(clip_model, "text"):  
+            text_mod = clip_model.text
+        else:                          
+            text_mod = clip_model
+
+        # salva riferimenti low-level
+        self.token_embedding = text_mod.token_embedding          
+        self.positional_embedding = text_mod.positional_embedding 
+        self.transformer = text_mod.transformer
+        self.ln_final = text_mod.ln_final
+        self.text_projection = text_mod.text_projection        
+
+        self.context_length = getattr(text_mod, "context_length", None)
         self.dtype = next(clip_model.parameters()).dtype
+        self.device = next(clip_model.parameters()).device
+
 
     def _encode(self, x, tokenized_prompts):
         # x: [C, L, D]
@@ -85,6 +103,7 @@ class TextEncoderOpenCLIP(nn.Module):
             raise ValueError("prompts_embeds must be [C,L,D] or [B,C,L,D]")
 
 
+
 class FamilyClipDetector:
     """Shared CLIP inference helper for a specific family of classes."""
 
@@ -93,11 +112,9 @@ class FamilyClipDetector:
         name: str,
         classes: Sequence[str],
         temperature: float,
-        source: Optional[str],
         *,
         clip_model: nn.Module,
         text_encoder: nn.Module,
-        preprocess,
         device: torch.device,
         text_features: Optional[torch.Tensor] = None,
         prompt_learner: Optional[nn.Module] = None,
@@ -108,11 +125,9 @@ class FamilyClipDetector:
         self.name = name
         self.classes = list(classes)
         self.temperature = float(temperature)
-        self.source = source
 
         self.clip_model = clip_model
         self.text_encoder = text_encoder
-        self.preprocess = preprocess
         self.device = device
         self.prompt_learner = prompt_learner
 
@@ -260,9 +275,6 @@ class FamilyClipDetector:
             "classes": per_class,
         }
 
-    predict_batch = predict
-
-    # Alias for clarity when used outside
     predict_batch = predict
 
 
