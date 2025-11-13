@@ -280,7 +280,7 @@ class FamilyClipDetector:
 
 
 class FamilyAdaptedClipDetector:
-    """Fine-tuned CLIP detector that owns both backbone and classifier."""
+    """Fine-tuned detector that mirrors the FamilyClipDetector API."""
 
     def __init__(
         self,
@@ -291,19 +291,18 @@ class FamilyAdaptedClipDetector:
         preprocess,
         device: torch.device,
         feature_dropout: float = 0.0,
-        mode: str = "linear_probe"
+        train_backbone: bool = False,
+        temperature: float | None = None,
     ) -> None:
         self.name = name
         self.classes = list(classes)
         self.clip_model = clip_model
         self.device = device
         self.preprocess = preprocess
-        self.temperature = None  
-        self.mode = mode 
-        
-        embed_dim = getattr(getattr(clip_model, "visual", None), "output_dim", None)
-        if embed_dim is None:
-            embed_dim = clip_model.text_projection.shape[1]
+        self.temperature = temperature
+        self.train_backbone = bool(train_backbone)
+
+        embed_dim = self._infer_embed_dim()
 
         feature_dropout = max(0.0, float(feature_dropout))
         head_layers: List[nn.Module] = []
@@ -311,14 +310,35 @@ class FamilyAdaptedClipDetector:
             head_layers.append(nn.Dropout(feature_dropout))
         head_layers.append(nn.Linear(embed_dim, len(self.classes)))
         self.classifier = nn.Sequential(*head_layers).to(device)
-        if self.mode == "linear_probe":
-            for p in self.clip_model.parameters():
-                p.requires_grad_(False)
+
+        if not self.train_backbone:
+            self._freeze_backbone()
 
     def parameters(self) -> Iterable[nn.Parameter]:
-        if self.mode == "linear_probe":
+        if not self.train_backbone:
             return self.classifier.parameters()
-        return chain(self.clip_model.parameters(), self.classifier.parameters())
+        return chain(self._backbone_parameters(), self.classifier.parameters())
+
+    def _infer_embed_dim(self) -> int:
+        visual = getattr(self.clip_model, "visual", None)
+        if visual is not None and hasattr(visual, "output_dim"):
+            return visual.output_dim
+        if hasattr(self.clip_model, "text_projection"):
+            return self.clip_model.text_projection.shape[1]
+        raise ValueError("Unable to infer embedding dimension for classifier head.")
+
+    def _backbone_module(self) -> nn.Module:
+        visual = getattr(self.clip_model, "visual", None)
+        if isinstance(visual, nn.Module):
+            return visual
+        return self.clip_model
+
+    def _backbone_parameters(self) -> Iterable[nn.Parameter]:
+        return self._backbone_module().parameters()
+
+    def _freeze_backbone(self) -> None:
+        for p in self.clip_model.parameters():
+            p.requires_grad_(False)
 
     def encode_images(self, images: torch.Tensor) -> torch.Tensor:
         images = images.to(self.device)
@@ -327,19 +347,24 @@ class FamilyAdaptedClipDetector:
 
     def logits(self, images: torch.Tensor, *, require_grad: bool = False) -> torch.Tensor:
         images = images.to(self.device)
+        backbone_mode = require_grad and self.train_backbone
+        self._set_module_mode(self._backbone_module(), training=backbone_mode)
+        self._set_module_mode(self.classifier, training=require_grad)
         if require_grad:
-            self.clip_model.train()
-            self.classifier.train()
             return self._forward(images)
-
-        self.clip_model.eval()
-        self.classifier.eval()
         with torch.no_grad():
             return self._forward(images)
 
     def _forward(self, images: torch.Tensor) -> torch.Tensor:
         feats = self.encode_images(images)
         return self.classifier(feats)
+
+    @staticmethod
+    def _set_module_mode(module: nn.Module, *, training: bool) -> None:
+        if training:
+            module.train()
+        else:
+            module.eval()
 
     def predict(self, tensor: torch.Tensor, *, unknown_threshold: float) -> Dict[str, object]:
         with torch.no_grad():
