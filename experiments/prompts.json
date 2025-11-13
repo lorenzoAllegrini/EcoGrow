@@ -1,27 +1,53 @@
 {
-  "Aloe": {
-    "Aloe_Healthy": [
-      "uniform vibrant green; glossy smooth surface; firm turgid tissue; intact margins; no spots or discoloration",
-      "Healthy Aloe vera leaf with uniform green color, glossy surface, firm texture, and intact margins."
-    ],
-    "Aloe_Anthracnose": [
-      "dark sunken lesions with pale halos; rough dry centers; scattered along lamina; irregular margins",
-      "Aloe vera leaf affected by anthracnose, showing dark sunken lesions with pale halos and rough centers scattered across the blade."
-    ],
-    "Aloe_Leaf_Spot": [
-      "brown circular to oval spots; yellow halos; concentric rings; dry necrotic centers",
-      "Aloe vera leaf with leaf spot disease, featuring brown circular lesions with yellow halos and dry necrotic centers."
-    ],
-    "Aloe_Rust": [
-      "orange powdery pustules; pinpoint uredinia on undersides; yellowing around lesions",
-      "Aloe vera leaf showing rust, with orange powdery pustules on the undersides and yellow halos on the upper surface."
-    ],
-    "Aloe_Sunburn": [
-      "bleached whitish patches; scorched margins; tan necrotic areas; rough dry surface",
-      "Aloe vera leaf exhibiting sunburn, with bleached patches, scorched edges, and tan necrotic areas."
-    ]
+  "Snake_Plant": {
+      "Snake_Plant_Healthy": [
+          "upright thick leathery leaves; deep green with variegated bands; smooth glossy surface; firm turgid tissue",
+          "Healthy snake plant leaf with thick upright structure, deep green coloration featuring distinct variegated bands, glossy surface, and firm turgid tissue without signs of damage or discoloration."
+      ],
+      "Snake_Plant_Anthracnose": [
+          "sunken brown lesions; concentric rings; dark necrotic centers; scattered black acervuli; dry papery surface",
+          "Snake plant leaf affected by anthracnose, showing sunken brown lesions with concentric ring patterns, dark necrotic centers, and small black fungal fruiting bodies (acervuli) scattered on a dry papery surface."
+      ],
+      "Snake_Plant_Leaf_Withering": [
+          "loss of turgor; leaf curling; faded green color; soft drooping lamina; progressive tissue collapse",
+          "Snake plant leaf exhibiting withering symptoms, characterized by loss of firmness and turgor, downward curling, dull faded green coloration, and progressive soft collapse of the lamina often due to dehydration or root stress."
+      ]
   },
 
+  "Spider_Plant": {
+      "Spider_Plant_Healthy": [
+          "vivid arching green leaves; smooth glossy lamina; firm turgid tissue; white variegation uniform",
+          "Healthy spider plant leaf with arching shape, glossy green surface, and consistent white variegation along the midrib."
+      ],
+      "Spider_Plant_Fungal_Leaf_Spot": [
+          "small circular brown lesions; grayish centers; yellowish margins; coalescing spots on lamina; slight curling",
+          "Spider plant leaf affected by fungal leaf spot, showing small circular brown lesions with grayish centers and yellow halos that may merge, often causing slight curling of the affected area."
+      ],
+      "Spider_Plant_Necrosis": [
+          "dark brown to black dead tissue; sharp borders; dry brittle texture; often starting from tips or margins",
+          "Spider plant leaf with necrosis, characterized by dark, brittle dead tissue spreading from the leaf tip or margins with sharply defined borders."
+      ]
+  },
+
+  "Money_Plant": {
+    "Money_Plant_Healthy": [
+      "vivid green; smooth waxy sheen; firm turgid tissue; intact heart-shaped margins",
+      "Healthy money plant leaf with vivid green color, waxy surface, and intact margins."
+    ],
+    "Money_Plant_Bacterial_Wilt": [
+      "sudden limpness; water-soaked veins; dark vascular streaks; generalized wilt",
+      "Money plant leaf showing bacterial wilt, with water-soaked venation, dark vascular streaks, and overall wilting."
+    ],
+    "Money_Plant_Chlorosis": [
+      "interveinal yellowing; veins remain green; diffuse pale lamina",
+      "Money plant leaf with chlorosis, characterized by interveinal yellowing while veins remain green."
+    ],
+    "Money_Plant_Manganese_Toxicity": [
+      "interveinal chlorosis; numerous brown-black specks; dull reduced gloss; slight puckering",
+      "Money plant leaf expressing manganese toxicity, with interveinal chlorosis, scattered brown to black specks, and a dullened surface."
+    ]
+  },
+  
   "Chrysanthemum": {
     "Chrysanthemum_Healthy": [
       "vivid green lamina; smooth turgid texture; crisp serrated margins; no lesions",
@@ -53,25 +79,6 @@
     "Hibiscus_Scorch": [
       "marginal browning; interveinal yellowing near edges; curled crisp margins",
       "Hibiscus leaf exhibiting scorch, with marginal browning, interveinal chlorosis near the edges, and curled, crisp margins."
-    ]
-  },
-
-  "Money_sPlant": {
-    "Money_Plant_Healthy": [
-      "vivid green; smooth waxy sheen; firm turgid tissue; intact heart-shaped margins",
-      "Healthy money plant leaf with vivid green color, waxy surface, and intact margins."
-    ],
-    "Money_Plant_Bacterial_Wilt": [
-      "sudden limpness; water-soaked veins; dark vascular streaks; generalized wilt",
-      "Money plant leaf showing bacterial wilt, with water-soaked venation, dark vascular streaks, and overall wilting."
-    ],
-    "Money_Plant_Chlorosis": [
-      "interveinal yellowing; veins remain green; diffuse pale lamina",
-      "Money plant leaf with chlorosis, characterized by interveinal yellowing while veins remain green."
-    ],
-    "Money_Plant_Manganese_Toxicity": [
-      "interveinal chlorosis; numerous brown-black specks; dull reduced gloss; slight puckering",
-      "Money plant leaf expressing manganese toxicity, with interveinal chlorosis, scattered brown to black specks, and a dullened surface."
     ]
   },
 
@@ -131,5 +138,28 @@
       "small brown circular to irregular spots; chlorotic halos; merging into larger patches",
       "Turmeric leaf with leaf spot disease, presenting small brown lesions with chlorotic halos that can merge into larger patches."
     ]
-  }
+  },
+  "Aloe": {
+      "Aloe_Healthy": [
+        "uniform vibrant green; glossy smooth surface; firm turgid tissue; intact margins; no spots or discoloration",
+        "Healthy Aloe vera leaf with uniform green color, glossy surface, firm texture, and intact margins."
+      ],
+      "Aloe_Anthracnose": [
+        "dark sunken lesions with pale halos; rough dry centers; scattered along lamina; irregular margins",
+        "Aloe vera leaf affected by anthracnose, showing dark sunken lesions with pale halos and rough centers scattered across the blade."
+      ],
+      "Aloe_Leaf_Spot": [
+        "brown circular to oval spots; yellow halos; concentric rings; dry necrotic centers",
+        "Aloe vera leaf with leaf spot disease, featuring brown circular lesions with yellow halos and dry necrotic centers."
+      ],
+      "Aloe_Rust": [
+        "orange powdery pustules; pinpoint uredinia on undersides; yellowing around lesions",
+        "Aloe vera leaf showing rust, with orange powdery pustules on the undersides and yellow halos on the upper surface."
+      ],
+      "Aloe_Sunburn": [
+        "bleached whitish patches; scorched margins; tan necrotic areas; rough dry surface",
+        "Aloe vera leaf exhibiting sunburn, with bleached patches, scorched edges, and tan necrotic areas."
+      ]
+    } 
 }
+  

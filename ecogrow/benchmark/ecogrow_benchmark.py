@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
-import torch.nn.functional as F
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from ecogrow.data.plant_data import PlantData
 from ecogrow.training.trainers import EpochMetrics
@@ -33,56 +31,68 @@ class EcogrowBenchmark:
         self.data_root: str = data_root
         self.all_results: List[Dict[str, Any]] = []
      
-    def load_channel(
+    def load_data(
         self,
-        family_id: str,
         *,
+        family_id: Optional[str] = None,
+        families: Optional[Sequence[str]] = None,
         transform=None,
         segment_fn=None,
-    ) -> Tuple[PlantData, PlantData]:
-        """Load the training and testing datasets for a given plant.
+    ) -> Tuple[PlantData, PlantData, PlantData]:
+        """Load dataset splits, optionally filtering by family/families.
 
         Args:
-            family_id (str): the ID of the family of palnts to be used
+            family_id: single-family identifier (mutually exclusive with ``families``).
+            families: optional sequence of families to keep; ``None`` keeps every family.
             transform: optional transform to apply when fetching samples.
             segment_fn: optional preprocessing callable used before the transform.
 
         Returns:
-            Tuple[PlantData, PlantData]: training and testing datasets
+            Tuple[PlantData, PlantData, PlantData]: train/val/test datasets.
         """
+
+        if family_id is not None and families is not None:
+            raise ValueError("Specify only 'family_id' or 'families', not both.")
+
         train_data = PlantData(
-            dataset_root=self.data_root,
-            family_id=family_id,
             split="train",
-            transform=transform,
-            segment_fn=segment_fn,
-        )
-
-        test_data = PlantData(
             dataset_root=self.data_root,
-            family_id=family_id,
-            split="test",
             transform=transform,
             segment_fn=segment_fn,
+            families=families,
+            family_id=family_id  
         )
 
-        return train_data, test_data
+        val_data = PlantData(
+            split="val",
+            dataset_root=self.data_root,
+            transform=transform,
+            segment_fn=segment_fn,
+            families=families,
+            family_id=family_id 
+        )
+
+        return train_data, val_data
     
     def run(
         self,
-        family_id: str,
+        *,
         trainer,
         segment_fn: Any,
-        perc_eval: Optional[float] = 0.2,
-        fit_predictor_args: Optional[Dict[str, Any]] = None,    
+        family_id: Optional[str] = None,
+        families: Optional[Sequence[str]] = None,
+        perc_eval: Optional[float] = None,
+        fit_predictor_args: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Runs the benchmark for a given family.
+        """Run training/evaluation on one or more families (or globally).
 
         Args:
-            family_id (str): the ID of the channel to be used
             trainer: pre-configured trainer compatible with the benchmark interface.
-            fit_predictor_args (Optional[Dict[str, Any]]): arguments controlling optimisation.
-            perc_eval (Optional[float]): the percentage of the training data to be used for evaluation
+            segment_fn: preprocessing function applied before ``trainer.preprocess``.
+            family_id: optional single family identifier (legacy API).
+            families: optional sequence of families to include (``None`` = all).
+            perc_eval: deprecated, kept for backward compatibility (ignored).
+            fit_predictor_args: arguments controlling optimisation.
 
         Returns:
             Dict[str, Any]: collected metrics and bookkeeping for the run.
@@ -104,20 +114,17 @@ class EcogrowBenchmark:
             unknown = ", ".join(sorted(fit_args.keys()))
             raise ValueError(f"Unsupported fit arguments: {unknown}")
 
-        train_data, test_data = self.load_channel(
-            family_id,
+        if perc_eval not in (None, 0):
+            logging.info(
+                "'perc_eval' is deprecated and ignored; using the explicit validation split."
+            )
+
+        train_data, val_data = self.load_data(
+            family_id=family_id,
+            families=families,
             transform=preprocess,
             segment_fn=segment_fn,
         )
-
-        if perc_eval is not None and perc_eval > 0:
-            indices = np.arange(len(train_data))
-            np.random.shuffle(indices)
-            eval_size = max(int(len(train_data) * perc_eval), 1)
-            eval_dataset = Subset(train_data, indices[:eval_size])
-            train_data = Subset(train_data, indices[eval_size:])
-        else:
-            eval_dataset = None
 
         train_loader = DataLoader(
             train_data,
@@ -126,20 +133,27 @@ class EcogrowBenchmark:
         )
         eval_loader = (
             DataLoader(
-                eval_dataset,
+                val_data,
                 batch_size=batch_size,
                 shuffle=False,
             )
-            if eval_dataset is not None
+            if len(val_data) > 0
             else None
         )
 
         if optimizer is None:
             optimizer = torch.optim.AdamW(trainer.parameters(), lr=lr)
 
+        if family_id:
+            target_label = family_id
+        elif families:
+            target_label = ",".join(families)
+        else:
+            target_label = "all"
+
         logging.info(
-            "Starting fine-tuning for family '%s' | epochs=%d batch_size=%d",
-            family_id,
+            "Starting fine-tuning for '%s' | epochs=%d batch_size=%d",
+            target_label,
             epochs,
             batch_size,
         )
@@ -153,16 +167,15 @@ class EcogrowBenchmark:
             log_fn=log_fn,
         )
         eval_metrics: Optional[EpochMetrics] = None
-        if eval_loader is not None:
-            metrics = trainer.eval(eval_loader)
+        if eval_loader is not None and hasattr(trainer, "eval"):
+            eval_metrics = trainer.eval(eval_loader)
 
-        print(metrics)
         results: Dict[str, Any] = {
             "family_id": family_id,
+            "families": list(families) if families is not None else None,
             "train_history": history,
             "train_samples": len(train_loader.dataset),
-            "eval_samples": len(eval_loader.dataset) if eval_loader is not None else 0,
-            "test_samples": len(test_data),
+            "eval_samples": len(val_data),
             "temperature": getattr(trainer, "temperature", None),
         }
 

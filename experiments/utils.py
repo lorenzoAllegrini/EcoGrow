@@ -116,7 +116,7 @@ def export_family_embeddings(
     torch.save(payload, out_path)
     return payload
 
-def set_leaf_modules(model):
+def list_leaf_modules(model):
     leaves = []
     for name, module in model.named_modules():
         if len(list(module.children())) == 0:
