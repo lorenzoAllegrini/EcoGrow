@@ -9,7 +9,7 @@ from typing import Dict, List
 from torch import nn
 import torch
 import torch.nn.functional as F
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, LoraModel, get_peft_model
 
 os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
 
@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyAdaptedClipDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyClipDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -50,7 +50,7 @@ def _parse_args() -> Config:
     )
     parser.add_argument(
         "--prompts-config",
-        default="experiments/prompts_2.json",
+        default="experiments/prompts.json",
         help="File JSON con la configurazione delle famiglie e relative classi",
     )
     parser.add_argument(
@@ -66,7 +66,7 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--epochs",
         type=int,
-        default=1,
+        default=10,
         help="Numero di epoche di fine-tuning per ciascuna famiglia.",
     )
     parser.add_argument(
@@ -84,7 +84,7 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--lr",
         type=float,
-        default=5e-6,
+        default=5e-4,
         help="Learning rate per l'ottimizzatore AdamW.",
     )
     parser.add_argument(
@@ -145,7 +145,7 @@ def main() -> Dict[str, Dict[str, object]]:
         bias="none",
         task_type="FEATURE_EXTRACTION",
     )
-    clip_model.visual = get_peft_model(clip_model.visual, lora_config)
+    clip_model.visual = LoraModel(clip_model.visual, lora_config, adapter_name="default")
 
     base_state = _clone_state_dict(clip_model)
 
@@ -164,108 +164,91 @@ def main() -> Dict[str, Dict[str, object]]:
     with open(config.prompts_config, "r", encoding="utf-8") as f:
         prompt_config = json.load(f)
 
-    family_results: Dict[str, Dict[str, object]] = {}
-    summary_rows: List[Dict[str, object]] = []
+    families = tuple(dict.fromkeys(prompt_config.keys()))
+    if not families:
+        raise ValueError("Prompts config must define at least one family.")
 
-    num_families = len(prompt_config)
-    for i, (family_name, family_cfg) in enumerate(prompt_config.items(), start=1):
-        print(f"[{i}/{num_families}] Family: {family_name}")
+    clip_model.load_state_dict(base_state, strict=True)
+    clip_model.to(device)
 
-        clip_model.load_state_dict(base_state, strict=True)
-        clip_model.to(device)
+    preview_dataset = PlantData(
+        dataset_root=config.dataset_path,
+        families=families,
+        split="train",
+        segment_fn=segment_fn,
+        transform=preprocess,
+    )
+    classnames = preview_dataset.classes
 
-        classnames = [disease for disease in family_cfg.keys()]
-        family_detector = FamilyAdaptedClipDetector(
-            name=family_name,
-            classes=classnames,
-            clip_model=clip_model,
-            preprocess=preprocess,
-            device=device,
-            feature_dropout=config.classifier_dropout,
-        )
-        trainer = ClipFineTuneEngine(
-            family_detector=family_detector,
-        )
+    family_detector = FamilyClipDetector(
+        classes=classnames,
+        clip_model=clip_model,
+        preprocess=preprocess,
+        device=device,
+        feature_dropout=config.classifier_dropout,
+        train_backbone=True,
+    )
+    trainer = ClipFineTuneEngine(
+        family_detector=family_detector,
+    )
 
-        fit_args = {
-            "epochs": config.epochs,
-            "batch_size": config.batch_size,
-            "lr": config.lr,
-            "log_fn": lambda msg, fam=family_name: print(f"[{fam}] {msg}"),
-        }
+    fit_args = {
+        "epochs": config.epochs,
+        "batch_size": config.batch_size,
+        "lr": config.lr,
+        "log_fn": lambda msg: print(f"[GLOBAL] {msg}"),
+    }
 
-        result = benchmark.run(
-            family_id=family_name,
-            trainer=trainer,
-            segment_fn=segment_fn,
-            perc_eval=config.perc_eval,
-            fit_predictor_args=fit_args,
-        )
+    result = benchmark.run(
+        trainer=trainer,
+        segment_fn=segment_fn,
+        families=families,
+        perc_eval=None,
+        fit_predictor_args=fit_args,
+    )
 
-        test_dataset = PlantData(
-            dataset_root=config.dataset_path,
-            family_id=family_name,
-            split="test",
-            segment_fn=segment_fn,
-            transform=preprocess,
-        )
-        test_loader = torch.utils.data.DataLoader(
-            test_dataset,
-            batch_size=config.batch_size,
-            shuffle=False,
-        )
+    test_dataset = PlantData(
+        dataset_root=config.dataset_path,
+        families=families,
+        split="test",
+        segment_fn=segment_fn,
+        transform=preprocess,
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+    )
 
-        test_loss = 0.0
-        test_correct = 0
-        test_total = 0
-        for xb, yb in test_loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
-            with torch.no_grad():
-                logits = trainer.logits(xb)
-            preds = logits.argmax(dim=-1)
-            test_loss += F.cross_entropy(logits, yb, reduction="sum").item()
-            test_correct += (preds == yb).sum().item()
-            test_total += yb.size(0)
+    test_epoch = trainer.eval(test_loader)
+    test_metrics = {
+        "loss": test_epoch.loss,
+        "accuracy": test_epoch.accuracy,
+    }
+    result["test_metrics"] = test_metrics
 
-        test_metrics = {
-            "loss": test_loss / max(test_total, 1),
-            "accuracy": test_correct / max(test_total, 1),
-        }
-        result["test_metrics"] = test_metrics
+    eval_metrics = result.get("eval_metrics")
+    summary_row = {
+        "family_id": "global",
+        "train_samples": result["train_samples"],
+        "eval_samples": result["eval_samples"],
+        "test_samples": result["test_samples"],
+        "eval_loss": eval_metrics["loss"] if eval_metrics else None,
+        "eval_accuracy": eval_metrics["accuracy"] if eval_metrics else None,
+        "test_loss": test_metrics["loss"],
+        "test_accuracy": test_metrics["accuracy"],
+        "temperature": result.get("temperature"),
+    }
 
-        family_results[family_name] = result
+    csv_path = Path(benchmark.run_dir) / "results.csv"
+    fieldnames = list(summary_row.keys())
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(summary_row)
+    print(f"Results saved to {csv_path}")
 
-        eval_metrics = result.get("eval_metrics")
-        summary_rows.append(
-            {
-                "family_id": family_name,
-                "train_samples": result["train_samples"],
-                "eval_samples": result["eval_samples"],
-                "test_samples": result["test_samples"],
-                "eval_loss": eval_metrics["loss"] if eval_metrics else None,
-                "eval_accuracy": eval_metrics["accuracy"] if eval_metrics else None,
-                "test_loss": test_metrics["loss"],
-                "test_accuracy": test_metrics["accuracy"],
-                "temperature": result.get("temperature"),
-            }
-        )
-
-    if summary_rows:
-        csv_path = Path(benchmark.run_dir) / "results.csv"
-        fieldnames = list(summary_rows[0].keys())
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(summary_rows)
-        print(f"Results saved to {csv_path}")
-
-        test_accs = [row["test_accuracy"] for row in summary_rows if row["test_accuracy"] is not None]
-        if test_accs:
-            avg_acc = sum(test_accs) / len(test_accs)
-            print(f"Average test accuracy: {avg_acc:.3f}")
-
-    return family_results
+    return {"global": result}
 
 
 if __name__ == "__main__":

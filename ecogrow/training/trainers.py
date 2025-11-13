@@ -181,6 +181,7 @@ class ClipPromptEngine:
             loss=eval_loss / max(eval_total, 1),
             accuracy=eval_correct / max(eval_total, 1),
         ) 
+        return eval_metrics
 
 
 
@@ -281,3 +282,24 @@ class ClipFineTuneEngine:
         avg_loss = total_loss / max(total, 1)
         acc = correct / max(total, 1)
         return EpochMetrics(loss=avg_loss, accuracy=acc)
+    
+    def eval(self, eval_loader):
+        eval_total = 0
+        eval_correct = 0
+        eval_loss = 0.0
+        for xb, yb in eval_loader:
+            xb = xb.to(self.device)
+            yb = yb.to(self.device)
+            with torch.no_grad():
+                logits = self.detector.logits(xb)
+            pred_idx = logits.argmax(dim=-1)
+
+            eval_loss += F.cross_entropy(logits, yb, reduction="sum").item()
+            eval_correct += (pred_idx == yb).sum().item()
+            eval_total += yb.size(0)
+
+        eval_metrics = EpochMetrics(
+            loss=eval_loss / max(eval_total, 1),
+            accuracy=eval_correct / max(eval_total, 1),
+        ) 
+        return eval_metrics

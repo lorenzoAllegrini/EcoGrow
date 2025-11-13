@@ -8,3 +8,6 @@
 /datasets
 */__pycache__*
 /aloe
+*__pycache__/*
+*.rar
+*.zip
