@@ -214,10 +214,10 @@ def main() -> Dict[str, Dict[str, object]]:
         test_dataset = PlantData(
             dataset_root=config.dataset_path,
             family_id=family_name,
-            split="test",
+            splits=("test",),
             segment_fn=segment_fn,
             transform=preprocess,
-        )
+        ).get_split("test")
         test_loader = torch.utils.data.DataLoader(
             test_dataset,
             batch_size=config.batch_size,
