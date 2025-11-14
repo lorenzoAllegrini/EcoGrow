@@ -15,8 +15,14 @@ poetry install
 ```bash
 export ECOGROW_DATASET_PATH=/percorso/al/dataset        # default: datasets
 export ECOGROW_EMBEDDINGS_DIR=artifacts/embeddings      # abilita il salvataggio degli embedding
-export ECOGROW_CLIP_PRETRAINED=laion2b_s34b_b79k        # modello pre addestrato OpenCLIP
+export ECOGROW_CLIP_PRETRAINED=laion2b_s34b_b79k        # sovrascrive il checkpoint CLIP pre addestrato
+export ECOGROW_MODEL_CACHE=artifacts/pretrained         # directory dove salvare i checkpoint MobileCLIP
 ```
+
+Se `ECOGROW_CLIP_PRETRAINED` non è impostata, gli script degli esperimenti scaricano
+automaticamente i pesi `MobileCLIP-S2` da Hugging Face dentro `ECOGROW_MODEL_CACHE`
+(default: `artifacts/pretrained/mobileclip-s2/`) e riutilizzano lo stesso percorso
+nelle esecuzioni successive.
 
 ## Struttura del dataset
 Lo script di training si aspetta una cartella con gli split `train/` e `test/`, ciascuno suddiviso per famiglia botanica e malattia, per esempio:
@@ -70,7 +76,7 @@ Lo script `experiments/clip_experiment.py` esegue il seguente flusso:
 
 ## Verifica
 Dopo il run controlla:
-- console log per andamento di loss/accuracy
+- console log per andamento di loss/F1
 - `experiments/<run-id>/results.csv` per le metriche aggregate
 - la directory `artifacts/embeddings` (se specificata) per gli embedding da usare in inferenza
 

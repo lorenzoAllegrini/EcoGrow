@@ -126,11 +126,11 @@ class EcogrowBenchmark:
             segment_fn=segment_fn,
         )
 
-        train_loader = DataLoader(
-            train_data,
+        train_loader = train_data.make_dataloader(
             batch_size=batch_size,
-            shuffle=True,
+            weighted=True,
         )
+        train_log_priors = getattr(train_data, "log_priors", None)
         eval_loader = (
             DataLoader(
                 val_data,
@@ -158,7 +158,7 @@ class EcogrowBenchmark:
             batch_size,
         )
 
-        history = trainer.fit(
+        fit_kwargs = dict(
             optimizer=optimizer,
             train_loader=train_loader,
             epochs=epochs,
@@ -166,6 +166,12 @@ class EcogrowBenchmark:
             grad_clip=grad_clip,
             log_fn=log_fn,
         )
+        if (
+            train_log_priors is not None
+            and getattr(trainer, "supports_log_priors", False)
+        ):
+            fit_kwargs["log_priors"] = train_log_priors
+        history = trainer.fit(**fit_kwargs)
         eval_metrics: Optional[EpochMetrics] = None
         if eval_loader is not None and hasattr(trainer, "eval"):
             eval_metrics = trainer.eval(eval_loader)
@@ -182,7 +188,7 @@ class EcogrowBenchmark:
         if eval_metrics is not None:
             results["eval_metrics"] = {
                 "loss": eval_metrics.loss,
-                "accuracy": eval_metrics.accuracy,
+                "f1": eval_metrics.f1,
             }
 
         self.all_results.append(results)

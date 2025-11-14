@@ -242,7 +242,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source",
-        default=str("Cactus_dataset"),
+        default=str("dataset_flat_structure 2"),
         help="Percorso della directory Roboflow da cui leggere i dati (default: ./roboflow_data).",
     )
     parser.add_argument(

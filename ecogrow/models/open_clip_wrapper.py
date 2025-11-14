@@ -104,12 +104,11 @@ class TextEncoderOpenCLIP(nn.Module):
 
 
 
-class FamilyClipDetector:
-    """Shared CLIP inference helper for a specific family of classes."""
+class DiseaseClipDetector:
+    """Shared CLIP inference helper for an arbitrary set of disease classes."""
 
     def __init__(
         self,
-        name: str,
         classes: Sequence[str],
         temperature: float,
         *,
@@ -118,13 +117,14 @@ class FamilyClipDetector:
         device: torch.device,
         text_features: Optional[torch.Tensor] = None,
         prompt_learner: Optional[nn.Module] = None,
+        detector_id: Optional[str] = None,
     ) -> None:
         if text_features is None and prompt_learner is None:
             raise ValueError("Provide either text_features or a prompt_learner.")
 
-        self.name = name
         self.classes = list(classes)
         self.temperature = float(temperature)
+        self.detector_id = detector_id
 
         self.clip_model = clip_model
         self.text_encoder = text_encoder
@@ -148,7 +148,7 @@ class FamilyClipDetector:
         if self._static_text_features is not None:
             return self._static_text_features
         if self.prompt_learner is None:
-            raise RuntimeError("FamilyDetector has no prompt learner or static text features.")
+            raise RuntimeError("DiseaseClipDetector has no prompt learner or static text features.")
         if with_grad:
             prompts_embeds, tokenized_prompts = self.prompt_learner()
             feats = self.text_encoder(prompts_embeds, tokenized_prompts)
@@ -267,20 +267,22 @@ class FamilyClipDetector:
         ]
         per_class.sort(key=lambda item: item["probability"], reverse=True)
 
-        return {
-            "family": self.name,
+        result = {
             "prediction": label,
             "raw_label": raw_label,
             "probability": probability,
             "classes": per_class,
         }
+        if self.detector_id is not None:
+            result["detector_id"] = self.detector_id
+        return result
 
     predict_batch = predict
 
 
 
 class FamilyAdaptedClipDetector:
-    """Fine-tuned detector that mirrors the FamilyClipDetector API."""
+    """Fine-tuned detector that mirrors the DiseaseClipDetector API."""
 
     def __init__(
         self,
@@ -293,14 +295,16 @@ class FamilyAdaptedClipDetector:
         feature_dropout: float = 0.0,
         train_backbone: bool = False,
         temperature: float | None = None,
+        text_encoder: Optional[nn.Module] = None,
     ) -> None:
         self.name = name
         self.classes = list(classes)
         self.clip_model = clip_model
         self.device = device
         self.preprocess = preprocess
-        self.temperature = temperature
+        self.temperature = temperature if temperature is not None else 0.07
         self.train_backbone = bool(train_backbone)
+        self.text_encoder = text_encoder
 
         embed_dim = self._infer_embed_dim()
 
@@ -323,6 +327,9 @@ class FamilyAdaptedClipDetector:
         visual = getattr(self.clip_model, "visual", None)
         if visual is not None and hasattr(visual, "output_dim"):
             return visual.output_dim
+        text = getattr(self.clip_model, "text", None)
+        if text is not None and hasattr(text, "output_dim"):
+            return text.output_dim
         if hasattr(self.clip_model, "text_projection"):
             return self.clip_model.text_projection.shape[1]
         raise ValueError("Unable to infer embedding dimension for classifier head.")
@@ -345,11 +352,35 @@ class FamilyAdaptedClipDetector:
         feats = self.clip_model.encode_image(images)
         return F.normalize(feats, dim=-1)
 
-    def logits(self, images: torch.Tensor, *, require_grad: bool = False) -> torch.Tensor:
+    def logits(
+        self,
+        images: torch.Tensor,
+        *,
+        require_grad: bool = False,
+        prompts_embeds: Optional[torch.Tensor] = None,
+        tokenized_prompts: Optional[torch.Tensor] = None,
+        text_features: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         images = images.to(self.device)
+        use_prompt_logits = (
+            text_features is not None
+            or (prompts_embeds is not None and tokenized_prompts is not None)
+        )
+
         backbone_mode = require_grad and self.train_backbone
         self._set_module_mode(self._backbone_module(), training=backbone_mode)
-        self._set_module_mode(self.classifier, training=require_grad)
+        self._set_module_mode(self.classifier, training=require_grad and not use_prompt_logits)
+
+        if use_prompt_logits:
+            feats = self.encode_images(images)
+            txt = self._resolve_text_features(
+                prompts_embeds=prompts_embeds,
+                tokenized_prompts=tokenized_prompts,
+                text_features=text_features,
+                require_grad=require_grad,
+            )
+            return (feats @ txt.t()) / float(self.temperature)
+
         if require_grad:
             return self._forward(images)
         with torch.no_grad():
@@ -391,3 +422,36 @@ class FamilyAdaptedClipDetector:
         }
 
     predict_batch = predict
+
+    def _resolve_text_features(
+        self,
+        *,
+        prompts_embeds: Optional[torch.Tensor],
+        tokenized_prompts: Optional[torch.Tensor],
+        text_features: Optional[torch.Tensor],
+        require_grad: bool,
+    ) -> torch.Tensor:
+        if text_features is not None:
+            feats = torch.as_tensor(text_features).to(self.device)
+            feats = F.normalize(feats, dim=-1)
+            if feats.dim() == 3:
+                feats = feats[0]
+            return feats
+
+        if prompts_embeds is None or tokenized_prompts is None:
+            raise ValueError("Provide either text_features or (prompts_embeds, tokenized_prompts).")
+        if self.text_encoder is None:
+            raise RuntimeError(
+                "FamilyAdaptedClipDetector was not initialized with a text_encoder, "
+                "cannot encode prompt embeddings."
+            )
+
+        if require_grad:
+            txt = self.text_encoder(prompts_embeds, tokenized_prompts)
+        else:
+            with torch.no_grad():
+                txt = self.text_encoder(prompts_embeds, tokenized_prompts)
+        txt = F.normalize(txt.to(self.device), dim=-1)
+        if txt.dim() == 3:
+            txt = txt[0]
+        return txt

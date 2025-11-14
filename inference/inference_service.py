@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request
 from PIL import Image
 
 from ecogrow.data.plant_data import make_segment_fn
-from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, FamilyDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, DiseaseClipDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -29,7 +29,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 app = Flask(__name__)
 
 
-## FamilyDetector is now provided by ecogrow.models.open_clip_wrapper
+## Disease detectors are provided by ecogrow.models.open_clip_wrapper
 
 
 def _build_segmenter():
@@ -47,16 +47,15 @@ def _load_detectors(
     root: Path,
     clip_model: torch.nn.Module,
     text_encoder: torch.nn.Module,
-    preprocess,
     device: torch.device,
-) -> Dict[str, FamilyDetector]:
+) -> Dict[str, DiseaseClipDetector]:
     if not root.is_dir():
         raise RuntimeError(
             f"Embeddings directory '{root}' not found. "
             "Set ECOGROW_EMBEDDINGS_DIR to a folder containing *.pt artifacts."
         )
 
-    detectors: Dict[str, FamilyDetector] = {}
+    detectors: Dict[str, DiseaseClipDetector] = {}
     for path in sorted(root.glob("*.pt")):
         payload = torch.load(path, map_location="cpu")
         family = payload.get("family") or path.stem
@@ -67,16 +66,14 @@ def _load_detectors(
             raise ValueError(f"Embedding file '{path.name}' missing classes or text_features.")
 
         tensor_features = torch.as_tensor(text_features)
-        detectors[family] = FamilyDetector(
-            name=family,
+        detectors[family] = DiseaseClipDetector(
             classes=list(classes),
             temperature=temperature,
-            source=path.name,
             clip_model=clip_model,
             text_encoder=text_encoder,
-            preprocess=preprocess,
             device=device,
             text_features=tensor_features,
+            detector_id=family,
         )
 
     if not detectors:
@@ -115,7 +112,6 @@ class DiseaseInferenceService:
             self.embeddings_dir,
             self.clip_model,
             self.text_encoder,
-            self.preprocess,
             self.device,
         )
         self.default_unknown_threshold = float(default_unknown_threshold)
@@ -174,7 +170,10 @@ class DiseaseInferenceService:
                 "clip_model": self.model_name,
                 "pretrained": self.pretrained_tag,
                 "device": str(self.device),
-                "temperatures": {det.name: det.temperature for det in targets},
+                "temperatures": {
+                    (det.detector_id or f"detector_{idx}"): det.temperature
+                    for idx, det in enumerate(targets)
+                },
             },
         }
 

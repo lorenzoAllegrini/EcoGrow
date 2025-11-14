@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-import shutil,random
+import random
+import shutil
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Set
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 DEFAULT_SPECIES = {
     "chrysanthemum",
@@ -84,7 +87,11 @@ def make_segment_fn(
 class Sample:
     path: Path
     label: int
+    original_class_name: str
 
+
+def _slugify(name: str) -> str:
+    return name.replace("-", "_").replace(" ", "_").lower()
 
 class PlantData(Dataset):
     def __init__(
@@ -99,6 +106,7 @@ class PlantData(Dataset):
         transform: Optional[Callable[[Image.Image], object]] = None,
         split_name: Optional[str] = None,
     ) -> None:
+        
         self.root = Path(dataset_root).expanduser().resolve()
         self.segment_fn = segment_fn
         self.transform = transform
@@ -130,7 +138,16 @@ class PlantData(Dataset):
 
         self.split = resolved_split
         self.families: List[str] = []
+        self.original_class_counts: Dict[str, int] = {}
+        self.class_counts: Dict[int, int] = {}
         self._prepare_samples()
+
+        counts = torch.tensor(
+            [self.class_counts[idx] for idx in range(len(self.class_counts))],
+            dtype=torch.float32,
+        )
+        freq = counts / counts.sum()
+        self.log_priors = torch.log(freq + 1e-8)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -150,21 +167,35 @@ class PlantData(Dataset):
 
         class_to_idx: Dict[str, int] = {}
         samples: List[Sample] = []
-        multi_family = len(family_dirs) > 1
+        multi_family = len(self.families) > 1
 
-        for family_name, family_dir in family_dirs:
+        for family_display_name, family_dir in family_dirs:
+            family_slug = self.resolve_name(family_display_name, DEFAULT_SPECIES)
             for disease_dir in sorted(p for p in family_dir.iterdir() if p.is_dir()):
-                disease_name = disease_dir.name
+                disease_slug = self.resolve_name(disease_dir.name, DEFAULT_DISEASES)
                 label_name = (
-                    disease_name if not multi_family else f"{family_name}/{disease_name}"
+                    disease_dir.name
+                    if not multi_family
+                    else f"{family_display_name}/{disease_dir.name}"
                 )
                 idx = class_to_idx.setdefault(label_name, len(class_to_idx))
-                for image_path in sorted(disease_dir.iterdir()):
-                    if not image_path.is_file():
-                        continue
-                    if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
-                        continue
-                    samples.append(Sample(path=image_path, label=idx))
+
+                valid_images = [
+                    p
+                    for p in sorted(disease_dir.iterdir())
+                    if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+                ]
+
+                key = f"{family_slug}:{disease_slug}"
+                self.original_class_counts[key] = (
+                    self.original_class_counts.get(key, 0) + len(valid_images)
+                )
+                self.class_counts[idx] = self.class_counts.get(idx, 0) + len(valid_images)
+
+                for image_path in valid_images:
+                    samples.append(
+                        Sample(path=image_path, label=idx, original_class_name=key)
+                    )
 
         if not samples:
             target = (
@@ -180,25 +211,45 @@ class PlantData(Dataset):
         self.class_to_idx = class_to_idx
         self.idx_to_class = {idx: label for label, idx in class_to_idx.items()}
 
+    def resolve_name(self, original_name: str, name_set: Set[str]) -> str:
+        normalized = _slugify(original_name)
+        for name in name_set:
+            if name in normalized:
+                return name
+        return normalized
+    
     def make_dataloader(
         self,
         batch_size: int,
+        weighted: bool = True,
         shuffle: bool = True,
         *,
         num_workers: int = 0,
         pin_memory: bool = False,
         drop_last: bool = False,
+        gamma: float = 0.4
     ) -> DataLoader:
         """Create a DataLoader with sane defaults for vision datasets."""
-
+        sampler = None
+        if weighted:
+            weights = []
+            for sample in self.samples:
+                count = self.original_class_counts.get(sample.original_class_name, 1)
+                weights.append(1.0 / (count ** gamma))
+            weights_tensor = torch.tensor(weights, dtype=torch.float32)
+            sampler = WeightedRandomSampler(weights_tensor, len(weights_tensor), replacement=True)
+            shuffle = False
+        
         return DataLoader(
-            self,
+            dataset=self,
             batch_size=batch_size,
             shuffle=shuffle,
+            sampler=sampler,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            drop_last=drop_last,
+            drop_last=drop_last
         )
+
 
     def _resolve_family_dirs(self) -> List[Tuple[str, Path]]:
         split_dir = self.root / self.split

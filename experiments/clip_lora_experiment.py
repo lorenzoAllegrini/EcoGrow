@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Dict, List
 from torch import nn
 import torch
-import torch.nn.functional as F
 from peft import LoraConfig, LoraModel, get_peft_model
 
 os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
@@ -18,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyClipDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyAdaptedClipDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -27,6 +26,7 @@ from ecogrow.preprocessing.image_segmentator import (
 from ecogrow.training.trainers import ClipFineTuneEngine
 from ecogrow.data.plant_data import PlantData, make_segment_fn
 from utils import list_leaf_modules
+from ecogrow.models.checkpoint_cache import ensure_mobileclip_checkpoint
 
 @dataclass(frozen=True)
 class Config:
@@ -129,23 +129,35 @@ def main() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_name = "ViT-B-32"
-    pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
-    clip_model, preprocess, _, _ = init_open_clip(
+    model_name = "MobileCLIP-S2"
+    pretrained_tag = ensure_mobileclip_checkpoint(model_name=model_name)
+    clip_model, preprocess, _, text_encoder = init_open_clip(
         model_name=model_name,
         pretrained_tag=pretrained_tag,
         device=device,
     )
-
+    print(f"sium: {list_leaf_modules(clip_model.visual)}")
     lora_config = LoraConfig(
         r=8,              
         lora_alpha=16,     
         lora_dropout=0.05,
-        target_modules=['out_proj', 'c_fc', 'c_proj'], 
+        target_modules = [
+            "token_mixer.qkv",
+            "token_mixer.proj",
+            "mlp.fc1",
+            "mlp.fc2",
+            "head.fc",
+            "se.fc1",   # squeeze-excitation primo FC (Conv2d 1x1)
+            "se.fc2",   # squeeze-excitation secondo FC
+        ],
         bias="none",
         task_type="FEATURE_EXTRACTION",
     )
-    clip_model.visual = LoraModel(clip_model.visual, lora_config, adapter_name="default")
+    base_visual = clip_model.visual
+    output_dim = getattr(base_visual, "output_dim", None)
+    clip_model.visual = LoraModel(base_visual, lora_config, adapter_name="default")
+    if output_dim is not None:
+        setattr(clip_model.visual, "output_dim", output_dim)
 
     base_state = _clone_state_dict(clip_model)
 
@@ -180,13 +192,15 @@ def main() -> Dict[str, Dict[str, object]]:
     )
     classnames = preview_dataset.classes
 
-    family_detector = FamilyClipDetector(
+    family_detector = FamilyAdaptedClipDetector(
+        name="global",
         classes=classnames,
         clip_model=clip_model,
         preprocess=preprocess,
         device=device,
         feature_dropout=config.classifier_dropout,
         train_backbone=True,
+        text_encoder=text_encoder,
     )
     trainer = ClipFineTuneEngine(
         family_detector=family_detector,
@@ -219,11 +233,12 @@ def main() -> Dict[str, Dict[str, object]]:
         batch_size=config.batch_size,
         shuffle=False,
     )
+    result["test_samples"] = len(test_dataset)
 
     test_epoch = trainer.eval(test_loader)
     test_metrics = {
         "loss": test_epoch.loss,
-        "accuracy": test_epoch.accuracy,
+        "f1": test_epoch.f1,
     }
     result["test_metrics"] = test_metrics
 
@@ -234,9 +249,9 @@ def main() -> Dict[str, Dict[str, object]]:
         "eval_samples": result["eval_samples"],
         "test_samples": result["test_samples"],
         "eval_loss": eval_metrics["loss"] if eval_metrics else None,
-        "eval_accuracy": eval_metrics["accuracy"] if eval_metrics else None,
+        "eval_f1": eval_metrics["f1"] if eval_metrics else None,
         "test_loss": test_metrics["loss"],
-        "test_accuracy": test_metrics["accuracy"],
+        "test_f1": test_metrics["f1"],
         "temperature": result.get("temperature"),
     }
 

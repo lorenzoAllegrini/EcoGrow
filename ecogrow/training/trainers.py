@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ecogrow.models.open_clip_wrapper import FamilyClipDetector, FamilyAdaptedClipDetector
+from ecogrow.models.open_clip_wrapper import DiseaseClipDetector, FamilyAdaptedClipDetector
 from .prompt_learners import ClipPromptLearner
 
 from peft import LoraConfig, get_peft_model
@@ -17,7 +17,7 @@ from peft import LoraConfig, get_peft_model
 @dataclass
 class EpochMetrics:
     loss: float
-    accuracy: float
+    f1: float
 
 
 
@@ -64,13 +64,13 @@ class ClipPromptEngine:
         device: torch.device,
         *,
         prompt_learner: ClipPromptLearner,
-        family_detector:FamilyClipDetector,
+        detector: DiseaseClipDetector,
         preprocess: Any,
     ) -> None:
         self.prompt_learner = prompt_learner
         self.device = device
         self.preprocess = preprocess
-        self.detector = family_detector
+        self.detector = detector
 
     def parameters(self):
         """Expose trainable parameters so the benchmark can build optimizers generically."""
@@ -103,7 +103,7 @@ class ClipPromptEngine:
             if log_fn is not None:
                 msg = (
                     f"epoch {epoch}/{epochs} | "
-                    f"train loss {train_metrics.loss:.4f} acc {train_metrics.accuracy:.3f}"
+                    f"train loss {train_metrics.loss:.4f} f1 {train_metrics.f1:.3f}"
                 )
                 log_fn(msg)
 
@@ -120,8 +120,7 @@ class ClipPromptEngine:
         prompt_module = self.prompt_learner
         prompt_module.train()
         total_loss = 0.0
-        correct = 0
-        total = 0
+        cm = None  # confusion matrix [C,C] rows=true, cols=pred
 
         for step, (xb, yb) in enumerate(loader, start=1):
             prompts, _ = prompt_module()
@@ -154,17 +153,33 @@ class ClipPromptEngine:
             # Metriche batch
             bs = xb.size(0)
             total_loss += loss.detach().item() * bs
-            correct += (logits.argmax(dim=-1) == yb).sum().item()
-            total += bs
+            with torch.no_grad():
+                preds = logits.argmax(dim=-1)
+                C = logits.size(-1)
+                idx = (yb.view(-1) * C + preds.view(-1)).to(torch.long).cpu()
+                counts = torch.bincount(idx, minlength=C * C).view(C, C)
+                if cm is None:
+                    cm = counts
+                else:
+                    cm += counts
 
-        avg_loss = total_loss / max(total, 1)
-        acc = correct / max(total, 1)
-        return EpochMetrics(loss=avg_loss, accuracy=acc)
+        denom = int(cm.sum().item()) if cm is not None else 1
+        avg_loss = total_loss / max(denom, 1)
+        if cm is None:
+            f1_macro = 0.0
+        else:
+            tp = torch.diag(cm).to(torch.float32)
+            fp = cm.sum(dim=0).to(torch.float32) - tp
+            fn = cm.sum(dim=1).to(torch.float32) - tp
+            prec = tp / torch.clamp(tp + fp, min=1.0)
+            rec = tp / torch.clamp(tp + fn, min=1.0)
+            f1 = 2 * prec * rec / torch.clamp(prec + rec, min=1e-12)
+            f1_macro = float(f1.mean().item())
+        return EpochMetrics(loss=avg_loss, f1=f1_macro)
     
     def eval(self, eval_loader):
-        eval_total = 0
-        eval_correct = 0
         eval_loss = 0.0
+        cm = None
         prompts, _ = self.prompt_learner()
         for xb, yb in eval_loader:
             xb = xb.to(self.device)
@@ -174,12 +189,29 @@ class ClipPromptEngine:
             pred_idx = logits.argmax(dim=-1)
 
             eval_loss += F.cross_entropy(logits, yb, reduction="sum").item()
-            eval_correct += (pred_idx == yb).sum().item()
-            eval_total += yb.size(0)
+            C = logits.size(-1)
+            idx = (yb.view(-1) * C + pred_idx.view(-1)).to(torch.long).cpu()
+            counts = torch.bincount(idx, minlength=C * C).view(C, C)
+            if cm is None:
+                cm = counts
+            else:
+                cm += counts
+
+        denom = int(cm.sum().item()) if cm is not None else 1
+        if cm is None:
+            f1_macro = 0.0
+        else:
+            tp = torch.diag(cm).to(torch.float32)
+            fp = cm.sum(dim=0).to(torch.float32) - tp
+            fn = cm.sum(dim=1).to(torch.float32) - tp
+            prec = tp / torch.clamp(tp + fp, min=1.0)
+            rec = tp / torch.clamp(tp + fn, min=1.0)
+            f1 = 2 * prec * rec / torch.clamp(prec + rec, min=1e-12)
+            f1_macro = float(f1.mean().item())
 
         eval_metrics = EpochMetrics(
-            loss=eval_loss / max(eval_total, 1),
-            accuracy=eval_correct / max(eval_total, 1),
+            loss=eval_loss / max(denom, 1),
+            f1=f1_macro,
         ) 
         return eval_metrics
 
@@ -189,16 +221,22 @@ class ClipPromptEngine:
 class ClipFineTuneEngine:
     """Fine-tunes the CLIP image encoder plus a linear classifier per family."""
 
+    supports_log_priors = True
+
     def __init__(
         self,
         *,
         family_detector: FamilyAdaptedClipDetector,
+        prompt_learner: Optional[ClipPromptLearner] = None,
     ) -> None:
         self.detector = family_detector
         self.device = family_detector.device
         self.preprocess = family_detector.preprocess
         self.family_name = family_detector.name
         self.temperature = family_detector.temperature
+        self.prompt_learner = prompt_learner
+        self._log_prior_bias: Optional[torch.Tensor] = None
+        self._prior_tau: float = 1.0
 
     def parameters(self):
         """Expose trainable parameters for optimizer construction."""
@@ -206,7 +244,10 @@ class ClipFineTuneEngine:
 
     def logits(self, images: torch.Tensor, *, require_grad: bool = False) -> torch.Tensor:
         """Proxy to detector logits for evaluation loops."""
-        return self.detector.logits(images, require_grad=require_grad)
+        logits = self.detector.logits(images, require_grad=require_grad)
+        if self._log_prior_bias is not None:
+            logits = logits - self._prior_tau * self._log_prior_bias
+        return logits
 
     def fit(
         self,
@@ -216,12 +257,31 @@ class ClipFineTuneEngine:
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         grad_clip: Optional[float] = None,
         log_fn: Optional[Callable[[str], None]] = print,
+        log_priors = None,
+        tau: float = 1.0
     ) -> List[Dict[str, Optional[EpochMetrics]]]:
         history: List[Dict[str, Optional[EpochMetrics]]] = []
 
+        prior_bias = None
+        if log_priors is not None:
+            prior_bias = log_priors.to(self.device)
+            if prior_bias.numel() != len(self.detector.classes):
+                raise ValueError(
+                    "log_priors size does not match detector classes "
+                    f"({prior_bias.numel()} vs {len(self.detector.classes)})"
+                )
+            self._log_prior_bias = prior_bias
+            self._prior_tau = tau
+        else:
+            self._log_prior_bias = None
+
         for epoch in range(1, epochs + 1):
             train_metrics = self._run_train_epoch(
-                optimizer, train_loader, grad_clip
+                optimizer,
+                train_loader,
+                grad_clip,
+                log_priors=prior_bias,
+                tau=tau,
             )
 
             if scheduler is not None:
@@ -229,11 +289,10 @@ class ClipFineTuneEngine:
 
             if log_fn is not None:
                 log_fn(
-                    f"epoch {epoch}/{epochs} | train loss {train_metrics.loss:.4f} acc {train_metrics.accuracy:.3f}"
+                    f"epoch {epoch}/{epochs} | train loss {train_metrics.loss:.4f} f1 {train_metrics.f1:.3f}"
                 )
 
             history.append({"train": train_metrics})
-            print(history)
         return history
 
     def _run_train_epoch(
@@ -241,19 +300,30 @@ class ClipFineTuneEngine:
         optimizer: torch.optim.Optimizer,
         loader,
         grad_clip: Optional[float],
+        log_priors = None,
+        tau: float = 1.0
     ) -> EpochMetrics:
         total_loss = 0.0
-        correct = 0
-        total = 0
+        cm = None
         trainable_params = list(self.parameters())
-
+        if self.prompt_learner is not None:
+            self.prompt_learner.train()
         for xb, yb in loader:
+
+            if self.prompt_learner:
+                prompts, _ = self.prompt_learner()
             xb = xb.to(self.device)
             yb = yb.to(self.device)
 
             optimizer.zero_grad()
+            if self.prompt_learner: 
+                logits = self.detector.logits(xb, require_grad=True, prompts_embeds=prompts) 
+            else:
+                logits = self.detector.logits(xb, require_grad=True)
+            
+            if log_priors is not None:
+                logits = logits - tau * log_priors
 
-            logits = self.detector.logits(xb, require_grad=True)
             loss = F.cross_entropy(logits, yb)
             loss.backward()
 
@@ -276,30 +346,66 @@ class ClipFineTuneEngine:
 
             bs = xb.size(0)
             total_loss += loss.detach().item() * bs
-            correct += (logits.argmax(dim=-1) == yb).sum().item()
-            total += bs
+            with torch.no_grad():
+                preds = logits.argmax(dim=-1)
+                C = logits.size(-1)
+                idx = (yb.view(-1) * C + preds.view(-1)).to(torch.long).cpu()
+                counts = torch.bincount(idx, minlength=C * C).view(C, C)
+                if cm is None:
+                    cm = counts
+                else:
+                    cm += counts
 
-        avg_loss = total_loss / max(total, 1)
-        acc = correct / max(total, 1)
-        return EpochMetrics(loss=avg_loss, accuracy=acc)
+        denom = int(cm.sum().item()) if cm is not None else 1
+        avg_loss = total_loss / max(denom, 1)
+        if cm is None:
+            f1_macro = 0.0
+        else:
+            tp = torch.diag(cm).to(torch.float32)
+            fp = cm.sum(dim=0).to(torch.float32) - tp
+            fn = cm.sum(dim=1).to(torch.float32) - tp
+            prec = tp / torch.clamp(tp + fp, min=1.0)
+            rec = tp / torch.clamp(tp + fn, min=1.0)
+            f1 = 2 * prec * rec / torch.clamp(prec + rec, min=1e-12)
+            f1_macro = float(f1.mean().item())
+        return EpochMetrics(loss=avg_loss, f1=f1_macro)
     
     def eval(self, eval_loader):
-        eval_total = 0
-        eval_correct = 0
         eval_loss = 0.0
+        cm = None
+        bias = self._log_prior_bias
         for xb, yb in eval_loader:
             xb = xb.to(self.device)
             yb = yb.to(self.device)
             with torch.no_grad():
                 logits = self.detector.logits(xb)
+                if bias is not None:
+                    logits = logits - self._prior_tau * bias
             pred_idx = logits.argmax(dim=-1)
 
             eval_loss += F.cross_entropy(logits, yb, reduction="sum").item()
-            eval_correct += (pred_idx == yb).sum().item()
-            eval_total += yb.size(0)
+            C = logits.size(-1)
+            idx = (yb.view(-1) * C + pred_idx.view(-1)).to(torch.long).cpu()
+            counts = torch.bincount(idx, minlength=C * C).view(C, C)
+            if cm is None:
+                cm = counts
+            else:
+                cm += counts
+
+        denom = int(cm.sum().item()) if cm is not None else 1
+        if cm is None:
+            f1_macro = 0.0
+        else:
+            tp = torch.diag(cm).to(torch.float32)
+            fp = cm.sum(dim=0).to(torch.float32) - tp
+            fn = cm.sum(dim=1).to(torch.float32) - tp
+            prec = tp / torch.clamp(tp + fp, min=1.0)
+            rec = tp / torch.clamp(tp + fn, min=1.0)
+            f1 = 2 * prec * rec / torch.clamp(prec + rec, min=1e-12)
+            f1_macro = float(f1.mean().item())
 
         eval_metrics = EpochMetrics(
-            loss=eval_loss / max(eval_total, 1),
-            accuracy=eval_correct / max(eval_total, 1),
+            loss=eval_loss / max(denom, 1),
+            f1=f1_macro,
         ) 
         return eval_metrics

@@ -19,7 +19,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, FamilyClipDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, DiseaseClipDetector
+from ecogrow.models.checkpoint_cache import ensure_mobileclip_checkpoint
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -145,7 +146,7 @@ def main() -> Dict[str, Dict[str, object]]:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = "MobileCLIP-S2"
-    pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "/Users/lorenzoallegrini/.cache/huggingface/hub/models--pcuenq--MobileCLIP-S2/snapshots/6da8f9f1c7fa5ae89385ef86bfdee297d105e6f6/mobileclip_s2.pt")
+    pretrained_tag = ensure_mobileclip_checkpoint(model_name=model_name)
 
     clip_model, preprocess, tokenizer, text_encoder = init_open_clip(
         model_name=model_name,
@@ -195,18 +196,18 @@ def main() -> Dict[str, Dict[str, object]]:
             model_name=model_name,
         ).to(device)
 
-        family_detector = FamilyClipDetector(
-            name=family_name,
+        disease_detector = DiseaseClipDetector(
             classes=classnames,
             temperature=config.temperature,
             clip_model=clip_model,
             text_encoder=text_encoder,
             device=device,
             prompt_learner=prompt_learner,
+            detector_id=family_name,
         )
 
         trainer = ClipPromptEngine(
-            family_detector=family_detector,
+            detector=disease_detector,
             prompt_learner=prompt_learner,
             device=device,
             preprocess=preprocess
@@ -239,21 +240,11 @@ def main() -> Dict[str, Dict[str, object]]:
             batch_size=config.batch_size,
             shuffle=False,
         )
-        test_loss = 0.0
-        test_correct = 0
-        test_total = 0
-        for xb, yb in test_loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
-            with torch.no_grad():
-                logits = trainer.logits(xb)
-            preds = logits.argmax(dim=-1)
-            test_loss += F.cross_entropy(logits, yb, reduction="sum").item()
-            test_correct += (preds == yb).sum().item()
-            test_total += yb.size(0)
+        result["test_samples"] = len(test_dataset)
+        test_epoch = trainer.eval(test_loader)
         test_metrics = {
-            "loss": test_loss / max(test_total, 1),
-            "accuracy": test_correct / max(test_total, 1),
+            "loss": test_epoch.loss,
+            "f1": test_epoch.f1,
         }
         result["test_metrics"] = test_metrics
 
@@ -287,9 +278,9 @@ def main() -> Dict[str, Dict[str, object]]:
                 "eval_samples": result["eval_samples"],
                 "test_samples": result["test_samples"],
                 "eval_loss": eval_metrics["loss"] if eval_metrics else None,
-                "eval_accuracy": eval_metrics["accuracy"] if eval_metrics else None,
+                "eval_f1": eval_metrics["f1"] if eval_metrics else None,
                 "test_loss": test_metrics["loss"],
-                "test_accuracy": test_metrics["accuracy"],
+                "test_f1": test_metrics["f1"],
                 "temperature": result["temperature"],
             }
         )
@@ -303,12 +294,12 @@ def main() -> Dict[str, Dict[str, object]]:
             writer.writerows(summary_rows)
         print(f"Results saved to {csv_path}")
 
-        test_accs = [
-            row["test_accuracy"] for row in summary_rows if row["test_accuracy"] is not None
+        test_f1s = [
+            row["test_f1"] for row in summary_rows if row["test_f1"] is not None
         ]
-        if test_accs:
-            avg_acc = sum(test_accs) / len(test_accs)
-            print(f"Average test accuracy: {avg_acc:.3f}")
+        if test_f1s:
+            avg_f1 = sum(test_f1s) / len(test_f1s)
+            print(f"Average test F1: {avg_f1:.3f}")
 
     if config.embeddings_dir is not None and index_entries:
         index_payload = {

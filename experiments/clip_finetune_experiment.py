@@ -136,10 +136,11 @@ def main() -> Dict[str, Dict[str, object]]:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     backend = os.environ.get("ECOGROW_BACKEND", args.backend)
+    text_encoder = None
     if backend == "openclip":
         model_name = "ViT-B-32"
         pretrained_tag = os.environ.get("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
-        clip_model, preprocess, _, _ = init_open_clip(
+        clip_model, preprocess, _, text_encoder = init_open_clip(
             model_name=model_name,
             pretrained_tag=pretrained_tag,
             device=device,
@@ -189,6 +190,7 @@ def main() -> Dict[str, Dict[str, object]]:
             preprocess=preprocess,
             device=device,
             feature_dropout=config.classifier_dropout,
+            text_encoder=text_encoder,
         )
         trainer = ClipFineTuneEngine(
             family_detector=family_detector,
@@ -221,10 +223,11 @@ def main() -> Dict[str, Dict[str, object]]:
             batch_size=config.batch_size,
             shuffle=False,
         )
+        result["test_samples"] = len(test_dataset)
 
         test_loss = 0.0
-        test_correct = 0
         test_total = 0
+        cm = None
         for xb, yb in test_loader:
             xb = xb.to(device)
             yb = yb.to(device)
@@ -232,12 +235,29 @@ def main() -> Dict[str, Dict[str, object]]:
                 logits = trainer.logits(xb)
             preds = logits.argmax(dim=-1)
             test_loss += F.cross_entropy(logits, yb, reduction="sum").item()
-            test_correct += (preds == yb).sum().item()
             test_total += yb.size(0)
+            C = logits.size(-1)
+            idx = (yb.view(-1) * C + preds.view(-1)).to(torch.long).cpu()
+            counts = torch.bincount(idx, minlength=C * C).view(C, C)
+            if cm is None:
+                cm = counts
+            else:
+                cm += counts
+
+        if cm is None:
+            test_f1 = 0.0
+        else:
+            tp = torch.diag(cm).to(torch.float32)
+            fp = cm.sum(dim=0).to(torch.float32) - tp
+            fn = cm.sum(dim=1).to(torch.float32) - tp
+            prec = tp / torch.clamp(tp + fp, min=1.0)
+            rec = tp / torch.clamp(tp + fn, min=1.0)
+            f1 = 2 * prec * rec / torch.clamp(prec + rec, min=1e-12)
+            test_f1 = float(f1.mean().item())
 
         test_metrics = {
             "loss": test_loss / max(test_total, 1),
-            "accuracy": test_correct / max(test_total, 1),
+            "f1": test_f1,
         }
         result["test_metrics"] = test_metrics
 
@@ -251,9 +271,9 @@ def main() -> Dict[str, Dict[str, object]]:
                 "eval_samples": result["eval_samples"],
                 "test_samples": result["test_samples"],
                 "eval_loss": eval_metrics["loss"] if eval_metrics else None,
-                "eval_accuracy": eval_metrics["accuracy"] if eval_metrics else None,
+                "eval_f1": eval_metrics["f1"] if eval_metrics else None,
                 "test_loss": test_metrics["loss"],
-                "test_accuracy": test_metrics["accuracy"],
+                "test_f1": test_metrics["f1"],
                 "temperature": result.get("temperature"),
             }
         )
@@ -267,10 +287,10 @@ def main() -> Dict[str, Dict[str, object]]:
             writer.writerows(summary_rows)
         print(f"Results saved to {csv_path}")
 
-        test_accs = [row["test_accuracy"] for row in summary_rows if row["test_accuracy"] is not None]
-        if test_accs:
-            avg_acc = sum(test_accs) / len(test_accs)
-            print(f"Average test accuracy: {avg_acc:.3f}")
+        test_f1s = [row["test_f1"] for row in summary_rows if row["test_f1"] is not None]
+        if test_f1s:
+            avg_f1 = sum(test_f1s) / len(test_f1s)
+            print(f"Average test F1: {avg_f1:.3f}")
 
     return family_results
 
