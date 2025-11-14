@@ -298,6 +298,6 @@ class PlantData(Dataset):
 __all__ = [
     "PlantData",
     "make_segment_fn",
-    "DEFAULT_SPECIES",
-    "DEFAULT_DISEASES",
+    "SPECIES_MAPPING",
+    "DISEASES_MAPPING",
 ]
