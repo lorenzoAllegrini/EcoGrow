@@ -13,3 +13,4 @@
 *.zip
 *.csv
 *.pyc
+.DS_Store
