@@ -3,7 +3,7 @@ from .open_clip_wrapper import (
     freeze_open_clip_backbone,
     TextEncoderOpenCLIP,
     DiseaseClipDetector,
-    FamilyAdaptedClipDetector
+    ClipClassifierDetector
 )
 
 __all__ = [
@@ -11,5 +11,5 @@ __all__ = [
     "freeze_open_clip_backbone",
     "TextEncoderOpenCLIP",
     "DiseaseClipDetector",
-    "FamilyAdaptedClipDetector",
+    "ClipClassifierDetector",
 ]

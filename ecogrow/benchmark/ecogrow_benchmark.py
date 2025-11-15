@@ -34,63 +34,70 @@ class EcogrowBenchmark:
     def load_data(
         self,
         *,
-        family_id: Optional[str] = None,
-        families: Optional[Sequence[str]] = None,
         transform=None,
         segment_fn=None,
-    ) -> Tuple[PlantData, PlantData, PlantData]:
-        """Load dataset splits, optionally filtering by family/families.
+    ) -> Tuple[PlantData, PlantData, Optional[PlantData]]:
+        """Load dataset splits for the global model."""
 
-        Args:
-            family_id: single-family identifier (mutually exclusive with ``families``).
-            families: optional sequence of families to keep; ``None`` keeps every family.
-            transform: optional transform to apply when fetching samples.
-            segment_fn: optional preprocessing callable used before the transform.
-
-        Returns:
-            Tuple[PlantData, PlantData, PlantData]: train/val/test datasets.
-        """
-
-        if family_id is not None and families is not None:
-            raise ValueError("Specify only 'family_id' or 'families', not both.")
+        train_transform = self._resolve_transform(transform, "train")
+        val_transform = self._resolve_transform(transform, "val")
+        test_transform = self._resolve_transform(transform, "test")
 
         train_data = PlantData(
             split="train",
             dataset_root=self.data_root,
-            transform=transform,
+            transform=train_transform,
             segment_fn=segment_fn,
-            families=families,
-            family_id=family_id  
         )
 
         val_data = PlantData(
             split="val",
             dataset_root=self.data_root,
-            transform=transform,
+            transform=val_transform,
             segment_fn=segment_fn,
-            families=families,
-            family_id=family_id 
         )
 
-        return train_data, val_data
+        try:
+            test_data = PlantData(
+                split="test",
+                dataset_root=self.data_root,
+                transform=test_transform,
+                segment_fn=segment_fn,
+            )
+        except FileNotFoundError as exc:
+            logging.warning("Test split unavailable: %s", exc)
+            test_data = None
+
+        return train_data, val_data, test_data
+
+    @staticmethod
+    def _resolve_transform(transform_spec, split: str):
+        if transform_spec is None:
+            return None
+        if hasattr(transform_spec, "for_split"):
+            return transform_spec.for_split(split)
+        if isinstance(transform_spec, dict):
+            if split in transform_spec:
+                return transform_spec[split]
+            if "default" in transform_spec:
+                return transform_spec["default"]
+            # fallback to first available transform
+            return next(iter(transform_spec.values()))
+        return transform_spec
     
     def run(
         self,
         *,
         trainer,
         segment_fn: Any,
-        family_id: Optional[str] = None,
-        families: Optional[Sequence[str]] = None,
         perc_eval: Optional[float] = None,
         fit_predictor_args: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Run training/evaluation on one or more families (or globally).
+        """Run training/evaluation for the global detector.
 
         Args:
             trainer: pre-configured trainer compatible with the benchmark interface.
             segment_fn: preprocessing function applied before ``trainer.preprocess``.
-            family_id: optional single family identifier (legacy API).
-            families: optional sequence of families to include (``None`` = all).
             perc_eval: deprecated, kept for backward compatibility (ignored).
             fit_predictor_args: arguments controlling optimisation.
 
@@ -109,6 +116,9 @@ class EcogrowBenchmark:
         scheduler = fit_args.pop("scheduler", None)
         grad_clip = fit_args.pop("grad_clip", None)
         log_fn = fit_args.pop("log_fn", logging.info)
+        num_workers = fit_args.pop("num_workers", 0)
+        pin_memory = fit_args.pop("pin_memory", False)
+        drop_last = fit_args.pop("drop_last", False)
 
         if fit_args:
             unknown = ", ".join(sorted(fit_args.keys()))
@@ -119,9 +129,7 @@ class EcogrowBenchmark:
                 "'perc_eval' is deprecated and ignored; using the explicit validation split."
             )
 
-        train_data, val_data = self.load_data(
-            family_id=family_id,
-            families=families,
+        train_data, val_data, test_data = self.load_data(
             transform=preprocess,
             segment_fn=segment_fn,
         )
@@ -129,6 +137,9 @@ class EcogrowBenchmark:
         train_loader = train_data.make_dataloader(
             batch_size=batch_size,
             weighted=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
         )
         
         eval_loader = (
@@ -137,23 +148,25 @@ class EcogrowBenchmark:
                 batch_size=batch_size,
                 shuffle=False,
             )
-            if len(val_data) > 0
+            if val_data is not None and len(val_data) > 0
+            else None
+        )
+
+        test_loader = (
+            DataLoader(
+                test_data,
+                batch_size=batch_size,
+                shuffle=False,
+            )
+            if test_data is not None and len(test_data) > 0
             else None
         )
 
         if optimizer is None:
             optimizer = torch.optim.AdamW(trainer.parameters(), lr=lr)
 
-        if family_id:
-            target_label = family_id
-        elif families:
-            target_label = ",".join(families)
-        else:
-            target_label = "all"
-
         logging.info(
-            "Starting fine-tuning for '%s' | epochs=%d batch_size=%d",
-            target_label,
+            "Starting fine-tuning | epochs=%d batch_size=%d",
             epochs,
             batch_size,
         )
@@ -170,19 +183,28 @@ class EcogrowBenchmark:
         if eval_loader is not None and hasattr(trainer, "eval"):
             eval_metrics = trainer.eval(eval_loader)
 
+        test_metrics: Optional[EpochMetrics] = None
+        if test_loader is not None and hasattr(trainer, "eval"):
+            test_metrics = trainer.eval(test_loader)
+
         results: Dict[str, Any] = {
-            "family_id": family_id,
-            "families": list(families) if families is not None else None,
             "train_history": history,
             "train_samples": len(train_loader.dataset),
-            "eval_samples": len(val_data),
+            "eval_samples": len(val_data) if val_data is not None else 0,
+            "test_samples": len(test_data) if test_data is not None else 0,
             "temperature": getattr(trainer, "temperature", None),
+            "detector_name": getattr(trainer, "detector_name", None),
         }
 
         if eval_metrics is not None:
             results["eval_metrics"] = {
                 "loss": eval_metrics.loss,
                 "f1": eval_metrics.f1,
+            }
+        if test_metrics is not None:
+            results["test_metrics"] = {
+                "loss": test_metrics.loss,
+                "f1": test_metrics.f1,
             }
 
         self.all_results.append(results)

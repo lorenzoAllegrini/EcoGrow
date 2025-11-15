@@ -15,6 +15,10 @@ except ImportError as exc:  # pragma: no cover - defensive guard for optional de
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 _MOBILECLIP_SPECS = {
+    "MobileCLIP-S1": {
+        "repo_id": "apple/MobileCLIP-S1-OpenCLIP",
+        "filename": "open_clip_pytorch_model.bin",
+    },
     "MobileCLIP-S2": {"repo_id": "pcuenq/MobileCLIP-S2", "filename": "mobileclip_s2.pt"},
 }
 

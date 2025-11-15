@@ -4,6 +4,7 @@ from itertools import chain
 from typing import Callable, Tuple, List, Optional, Dict, Sequence, Iterable, Literal
 
 import open_clip
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -281,7 +282,7 @@ class DiseaseClipDetector:
 
 
 
-class FamilyAdaptedClipDetector:
+class ClipClassifierDetector:
     """Fine-tuned detector that mirrors the DiseaseClipDetector API."""
 
     def __init__(
@@ -414,7 +415,8 @@ class FamilyAdaptedClipDetector:
         per_class.sort(key=lambda item: item["probability"], reverse=True)
 
         return {
-            "family": self.name,
+            "detector": self.name,
+            "family": self.name,  # backward compatibility
             "prediction": label,
             "raw_label": raw_label,
             "probability": probability,
@@ -442,7 +444,7 @@ class FamilyAdaptedClipDetector:
             raise ValueError("Provide either text_features or (prompts_embeds, tokenized_prompts).")
         if self.text_encoder is None:
             raise RuntimeError(
-                "FamilyAdaptedClipDetector was not initialized with a text_encoder, "
+                "ClipClassifierDetector was not initialized with a text_encoder, "
                 "cannot encode prompt embeddings."
             )
 
@@ -455,3 +457,94 @@ class FamilyAdaptedClipDetector:
         if txt.dim() == 3:
             txt = txt[0]
         return txt
+
+
+class ConvNextDetector:
+    """Detector wrapper for ConvNeXt-based classifiers trained within EcoGrow."""
+
+    def __init__(
+        self,
+        classes: Sequence[str],
+        *,
+        model_name: str = "convnext_small",
+        pretrained: bool = True,
+        device: torch.device | str = "cpu",
+        preprocess=None,
+        train_backbone: bool = False,
+        drop_rate: float = 0.0,
+        **model_kwargs,
+    ) -> None:
+        self.classes = list(classes)
+        self.device = torch.device(device)
+        self.preprocess = preprocess
+        self.train_backbone = bool(train_backbone)
+
+        self.model = timm.create_model(
+            model_name,
+            pretrained=pretrained,
+            num_classes=len(self.classes),
+            drop_rate=drop_rate,
+            **model_kwargs,
+        )
+        self.model.to(self.device)
+
+        if not self.train_backbone:
+            self._freeze_backbone()
+
+    def parameters(self) -> Iterable[nn.Parameter]:
+        return self.model.parameters()
+    
+    def load_state_dict(self, state_dict: dict, strict: bool = True) -> None:
+        self.model.load_state_dict(state_dict, strict=strict)
+
+    def logits(self, images: torch.Tensor, *, require_grad: bool = False) -> torch.Tensor:
+        images = images.to(self.device)
+        if require_grad:
+            self.model.train(self.train_backbone)
+            return self.model(images)
+        self.model.eval()
+        with torch.no_grad():
+            return self.model(images)
+
+    def predict(self, tensor: torch.Tensor, *, unknown_threshold: float = 0.0) -> Dict[str, object]:
+        with torch.no_grad():
+            logits = self.logits(tensor, require_grad=False)
+            probs = logits.softmax(dim=-1).squeeze(0)
+
+        top_prob, top_idx = probs.max(dim=0)
+        raw_label = self.classes[top_idx.item()]
+        probability = float(top_prob.item())
+        label = raw_label if probability >= float(unknown_threshold) else "unknown"
+
+        per_class = [
+            {"label": cls, "probability": float(probs[i].item())}
+            for i, cls in enumerate(self.classes)
+        ]
+        per_class.sort(key=lambda item: item["probability"], reverse=True)
+
+        return {
+            "detector": self.name,
+            "family": self.name,
+            "prediction": label,
+            "raw_label": raw_label,
+            "probability": probability,
+            "classes": per_class,
+        }
+
+    predict_batch = predict
+
+    def _freeze_backbone(self) -> None:
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        classifier = self._get_classifier()
+        for p in classifier.parameters():
+            p.requires_grad_(True)
+
+    def _get_classifier(self) -> nn.Module:
+        classifier = self.model.get_classifier()
+        if isinstance(classifier, nn.Module):
+            return classifier
+        # Some timm models return tensors; fall back to searching common attributes
+        if hasattr(self.model, "head") and isinstance(self.model.head, nn.Module):
+            return self.model.head
+        raise RuntimeError("Unable to locate ConvNeXt classifier head.")
