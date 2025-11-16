@@ -1,7 +1,7 @@
 """Dataset utilities for EcoGrow projects."""
 
 from __future__ import annotations
-
+import torch
 import shutil,random
 from dataclasses import dataclass
 from functools import partial
@@ -9,47 +9,66 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import WeightedRandomSampler
+import math 
 
-DEFAULT_SPECIES = {
-    "chrysanthemum",
-    "hibiscus",
-    "money_plant",
-    "rose",
-    "turmeric",
-    "snake_plant",
-    "spider_plant",
-    "aloe",
-    "cactus",
+SPECIES_MAPPING = {
+    "chrysanthemum": "chrysanthemum",
+    "hibiscus": "hibiscus",
+    "money_plant": "money_plant",
+    "rose": "rose",
+    "turmeric": "turmeric",
+    "snake_plant": "snake_plant",
+    "spider_plant": "spider_plant",
+    "aloe": "aloe",
+    "cactus": "cactus",
 }
 
-DEFAULT_DISEASES = {
-    "bacterial_leaf_spot",
-    "septoria_leaf_spot",
-    "blight",
-    "necrosis",
-    "scorch",
-    "bacterial_wilt",
-    "chlorosis",
-    "manganese_toxicity",
-    "black_spot",
-    "downy_mildew",
-    "mosaic_virus",
-    "powdery_mildew",
-    "rust",
-    "yellow_mosaic_virus",
-    "aphid_infestation",
-    "blotch",
-    "leaf_necrosis",
-    "leaf_spot",
-    "healthy",
-    "anthracnose",
-    "leaf_withering",
-    "fungal_leaf_spot",
-    "leaf_tip_necrosis",
-    "sunburn",
-    "insect_damage",
-    "dactylopius_opuntia"
+DISEASE_MAPPING = {
+    "bacterial_leaf_spot": "bacterial_leaf_spot",
+    "bacterial_wilt": "bacterial_wilt",
+
+    "septoria_leaf_spot": "septoria_leaf_spot",
+
+    "black_spot": "black_spot",
+
+    "anthracnose": "anthracnose",
+
+    "blotch": "necrotic_fungal_lesion",
+
+    "leaf_spot": "generic_fungal_leaf_spot",
+    "fungal_leaf_spot": "generic_fungal_leaf_spot",
+
+
+    "blight": "blight",
+
+    "rust": "rust",
+
+    "necrosis": "foliar_necrosis",
+    "leaf_necrosis": "foliar_necrosis",
+    "leaf_tip_necrosis": "foliar_necrosis",
+
+    "downy_mildew": "downy_mildew",
+    "powdery_mildew": "powdery_mildew",
+
+    "mosaic_virus": "mosaic_virus",
+    "yellow_mosaic_virus": "yellow_mosaic_virus",
+
+    "aphid_infestation": "aphids",  
+    "dactylopius_opuntia": "cochineal",   
+    "insect_damage": "generic_insect_damage",  
+
+    "chlorosis": "chlorosis",                  
+    "manganese_toxicity": "manganese_toxicity",  
+
+    "scorch": "sun_scorch",
+    "sunburn": "sun_scorch",
+
+    "leaf_withering": "leaf_withering",
+
+    "healthy": "healthy",
 }
+
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -84,7 +103,7 @@ def make_segment_fn(
 class Sample:
     path: Path
     label: int
-
+    original_class_name: str
 
 class PlantData(Dataset):
     def __init__(
@@ -99,6 +118,7 @@ class PlantData(Dataset):
         transform: Optional[Callable[[Image.Image], object]] = None,
         split_name: Optional[str] = None,
     ) -> None:
+        
         self.root = Path(dataset_root).expanduser().resolve()
         self.segment_fn = segment_fn
         self.transform = transform
@@ -130,7 +150,19 @@ class PlantData(Dataset):
 
         self.split = resolved_split
         self.families: List[str] = []
+        self.original_classes_count: Dict[str, int] = {}
+        self.class_counts: Dict[str, int] = {}
         self._prepare_samples()
+ 
+        counts = torch.tensor(
+            [self.class_counts[idx] for idx in sorted(self.class_counts.keys())],
+            dtype=torch.float
+        )
+
+        freq = counts / counts.sum()     
+        log_prior = torch.log(freq + 1e-8) 
+
+        self.log_priors = log_prior     
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -145,26 +177,33 @@ class PlantData(Dataset):
         return image, sample.label
 
     def _prepare_samples(self) -> None:
-        family_dirs = self._resolve_family_dirs()
-        self.families = [name for name, _ in family_dirs]
-
+        species_dirs = self._resolve_family_dirs()
+        self.families = [name for name, _ in species_dirs]
         class_to_idx: Dict[str, int] = {}
         samples: List[Sample] = []
-        multi_family = len(family_dirs) > 1
 
-        for family_name, family_dir in family_dirs:
-            for disease_dir in sorted(p for p in family_dir.iterdir() if p.is_dir()):
-                disease_name = disease_dir.name
-                label_name = (
-                    disease_name if not multi_family else f"{family_name}/{disease_name}"
-                )
-                idx = class_to_idx.setdefault(label_name, len(class_to_idx))
-                for image_path in sorted(disease_dir.iterdir()):
-                    if not image_path.is_file():
-                        continue
-                    if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
-                        continue
-                    samples.append(Sample(path=image_path, label=idx))
+        for species_original_name, species_dir in species_dirs:
+            species_name = self.resolve_name(species_original_name, SPECIES_MAPPING)
+            for disease_dir in sorted(p for p in species_dir.iterdir() if p.is_dir()):
+                disease_name = self.resolve_name(disease_dir.name, DISEASE_MAPPING)
+                idx = class_to_idx.setdefault(disease_name, len(class_to_idx))
+
+                valid_images = [
+                    p for p in sorted(disease_dir.iterdir())
+                    if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+                ]
+
+                key = f"{species_name}_{disease_name}"
+                self.original_classes_count.setdefault(key, len(valid_images))
+                self.class_counts[idx] = self.class_counts.get(idx, 0) + len(valid_images)
+                for image_path in valid_images:
+                    samples.append(
+                        Sample(
+                            path=image_path,
+                            label=idx,
+                            original_class_name=key,
+                        )
+                    )
 
         if not samples:
             target = (
@@ -180,25 +219,42 @@ class PlantData(Dataset):
         self.class_to_idx = class_to_idx
         self.idx_to_class = {idx: label for label, idx in class_to_idx.items()}
 
+    def resolve_name(self, original_name: str, mapping: Dict[str, str]) -> str:
+        original_name = original_name.replace("-", "_").replace(" ", "_").lower()
+        for name in mapping.keys():
+            if name in original_name:
+                return mapping[name]
+        raise ValueError("name not in name_set")
+    
     def make_dataloader(
         self,
         batch_size: int,
+        weighted: bool = True,
         shuffle: bool = True,
         *,
         num_workers: int = 0,
         pin_memory: bool = False,
         drop_last: bool = False,
+        gamma: float = 0.4
     ) -> DataLoader:
         """Create a DataLoader with sane defaults for vision datasets."""
-
+        sampler = None
+        if weighted:
+            weights = [1.0/(self.original_classes_count[sample.original_class_name] ** gamma) for sample in self.samples]
+            weights = torch.tensor(weights, dtype=torch.float)
+            sampler = WeightedRandomSampler(weights, len(weights), replacement=True)
+            shuffle = False
+        
         return DataLoader(
-            self,
+            dataset=self,
             batch_size=batch_size,
             shuffle=shuffle,
+            sampler=sampler,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            drop_last=drop_last,
+            drop_last=drop_last
         )
+
 
     def _resolve_family_dirs(self) -> List[Tuple[str, Path]]:
         split_dir = self.root / self.split
@@ -242,6 +298,6 @@ class PlantData(Dataset):
 __all__ = [
     "PlantData",
     "make_segment_fn",
-    "DEFAULT_SPECIES",
-    "DEFAULT_DISEASES",
+    "SPECIES_MAPPING",
+    "DISEASES_MAPPING",
 ]

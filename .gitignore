@@ -11,3 +11,8 @@
 *__pycache__/*
 *.rar
 *.zip
+*.csv
+*.pyc
+.DS_Store
+/.venv/lib
+dataset*

@@ -28,7 +28,7 @@ from ecogrow.data.plant_data import (  # noqa: E402
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 
 
-def roboflow_format(
+def dataset_formatting(
     init_root: str,
     final_root: str,
     default_species: Set[str] = DEFAULT_SPECIES,
@@ -242,7 +242,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source",
-        default=str("Cactus_dataset"),
+        default=str("dataset_flat_structure 2"),
         help="Percorso della directory Roboflow da cui leggere i dati (default: ./roboflow_data).",
     )
     parser.add_argument(
@@ -279,7 +279,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    roboflow_format(
+    dataset_formatting(
         init_root=args.source,
         final_root=args.dest,
         overwrite=args.overwrite,

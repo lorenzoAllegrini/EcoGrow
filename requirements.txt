@@ -1,9 +1,21 @@
+
 flask>=3.0.0
 gunicorn>=21.2.0
-open_clip_torch>=2.24.0
-torch>=2.1.0
-torchvision>=0.16.0
+
+open-clip-torch>=2.24.0
+
 pillow>=10.0.0
-numpy>=1.24.0
+numpy>=1.24.0,<2.0.0
 rembg>=2.0.50
 roboflow>=1.1.22
+
+onnxruntime>=1.15.0 ; platform_system != "Darwin"
+onnxruntime-silicon>=1.15.0 ; platform_system == "Darwin"
+
+torch>=2.9.0,<3.0.0
+torchvision>=0.16.0
+
+tokenizers==0.19.1
+transformers>=4.44,<4.46
+peft>=0.17.1,<0.18.0
+huggingface-hub>=0.24.0,<1.0.0

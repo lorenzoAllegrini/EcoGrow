@@ -20,8 +20,8 @@ torch = "^2.9.0"
 tokenizers = "0.19.1"
 transformers = ">=4.44,<4.46"
 peft = "^0.17.1"
+huggingface-hub = ">=0.24.0,<1.0.0"
 
 [build-system]
 requires = ["poetry-core>=1.8.0"]
 build-backend = "poetry.core.masonry.api"
-

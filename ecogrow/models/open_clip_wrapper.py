@@ -4,6 +4,7 @@ from itertools import chain
 from typing import Callable, Tuple, List, Optional, Dict, Sequence, Iterable, Literal
 
 import open_clip
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -104,12 +105,11 @@ class TextEncoderOpenCLIP(nn.Module):
 
 
 
-class FamilyClipDetector:
-    """Shared CLIP inference helper for a specific family of classes."""
+class DiseaseClipDetector:
+    """Shared CLIP inference helper for an arbitrary set of disease classes."""
 
     def __init__(
         self,
-        name: str,
         classes: Sequence[str],
         temperature: float,
         *,
@@ -118,13 +118,14 @@ class FamilyClipDetector:
         device: torch.device,
         text_features: Optional[torch.Tensor] = None,
         prompt_learner: Optional[nn.Module] = None,
+        detector_id: Optional[str] = None,
     ) -> None:
         if text_features is None and prompt_learner is None:
             raise ValueError("Provide either text_features or a prompt_learner.")
 
-        self.name = name
         self.classes = list(classes)
         self.temperature = float(temperature)
+        self.detector_id = detector_id
 
         self.clip_model = clip_model
         self.text_encoder = text_encoder
@@ -148,7 +149,7 @@ class FamilyClipDetector:
         if self._static_text_features is not None:
             return self._static_text_features
         if self.prompt_learner is None:
-            raise RuntimeError("FamilyDetector has no prompt learner or static text features.")
+            raise RuntimeError("DiseaseClipDetector has no prompt learner or static text features.")
         if with_grad:
             prompts_embeds, tokenized_prompts = self.prompt_learner()
             feats = self.text_encoder(prompts_embeds, tokenized_prompts)
@@ -267,20 +268,22 @@ class FamilyClipDetector:
         ]
         per_class.sort(key=lambda item: item["probability"], reverse=True)
 
-        return {
-            "family": self.name,
+        result = {
             "prediction": label,
             "raw_label": raw_label,
             "probability": probability,
             "classes": per_class,
         }
+        if self.detector_id is not None:
+            result["detector_id"] = self.detector_id
+        return result
 
     predict_batch = predict
 
 
 
-class FamilyAdaptedClipDetector:
-    """Fine-tuned detector that mirrors the FamilyClipDetector API."""
+class ClipClassifierDetector:
+    """Fine-tuned detector that mirrors the DiseaseClipDetector API."""
 
     def __init__(
         self,
@@ -293,14 +296,16 @@ class FamilyAdaptedClipDetector:
         feature_dropout: float = 0.0,
         train_backbone: bool = False,
         temperature: float | None = None,
+        text_encoder: Optional[nn.Module] = None,
     ) -> None:
         self.name = name
         self.classes = list(classes)
         self.clip_model = clip_model
         self.device = device
         self.preprocess = preprocess
-        self.temperature = temperature
+        self.temperature = temperature if temperature is not None else 0.07
         self.train_backbone = bool(train_backbone)
+        self.text_encoder = text_encoder
 
         embed_dim = self._infer_embed_dim()
 
@@ -323,6 +328,9 @@ class FamilyAdaptedClipDetector:
         visual = getattr(self.clip_model, "visual", None)
         if visual is not None and hasattr(visual, "output_dim"):
             return visual.output_dim
+        text = getattr(self.clip_model, "text", None)
+        if text is not None and hasattr(text, "output_dim"):
+            return text.output_dim
         if hasattr(self.clip_model, "text_projection"):
             return self.clip_model.text_projection.shape[1]
         raise ValueError("Unable to infer embedding dimension for classifier head.")
@@ -345,11 +353,35 @@ class FamilyAdaptedClipDetector:
         feats = self.clip_model.encode_image(images)
         return F.normalize(feats, dim=-1)
 
-    def logits(self, images: torch.Tensor, *, require_grad: bool = False) -> torch.Tensor:
+    def logits(
+        self,
+        images: torch.Tensor,
+        *,
+        require_grad: bool = False,
+        prompts_embeds: Optional[torch.Tensor] = None,
+        tokenized_prompts: Optional[torch.Tensor] = None,
+        text_features: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         images = images.to(self.device)
+        use_prompt_logits = (
+            text_features is not None
+            or (prompts_embeds is not None and tokenized_prompts is not None)
+        )
+
         backbone_mode = require_grad and self.train_backbone
         self._set_module_mode(self._backbone_module(), training=backbone_mode)
-        self._set_module_mode(self.classifier, training=require_grad)
+        self._set_module_mode(self.classifier, training=require_grad and not use_prompt_logits)
+
+        if use_prompt_logits:
+            feats = self.encode_images(images)
+            txt = self._resolve_text_features(
+                prompts_embeds=prompts_embeds,
+                tokenized_prompts=tokenized_prompts,
+                text_features=text_features,
+                require_grad=require_grad,
+            )
+            return (feats @ txt.t()) / float(self.temperature)
+
         if require_grad:
             return self._forward(images)
         with torch.no_grad():
@@ -383,6 +415,115 @@ class FamilyAdaptedClipDetector:
         per_class.sort(key=lambda item: item["probability"], reverse=True)
 
         return {
+            "detector": self.name,
+            "family": self.name,  # backward compatibility
+            "prediction": label,
+            "raw_label": raw_label,
+            "probability": probability,
+            "classes": per_class,
+        }
+
+    predict_batch = predict
+
+    def _resolve_text_features(
+        self,
+        *,
+        prompts_embeds: Optional[torch.Tensor],
+        tokenized_prompts: Optional[torch.Tensor],
+        text_features: Optional[torch.Tensor],
+        require_grad: bool,
+    ) -> torch.Tensor:
+        if text_features is not None:
+            feats = torch.as_tensor(text_features).to(self.device)
+            feats = F.normalize(feats, dim=-1)
+            if feats.dim() == 3:
+                feats = feats[0]
+            return feats
+
+        if prompts_embeds is None or tokenized_prompts is None:
+            raise ValueError("Provide either text_features or (prompts_embeds, tokenized_prompts).")
+        if self.text_encoder is None:
+            raise RuntimeError(
+                "ClipClassifierDetector was not initialized with a text_encoder, "
+                "cannot encode prompt embeddings."
+            )
+
+        if require_grad:
+            txt = self.text_encoder(prompts_embeds, tokenized_prompts)
+        else:
+            with torch.no_grad():
+                txt = self.text_encoder(prompts_embeds, tokenized_prompts)
+        txt = F.normalize(txt.to(self.device), dim=-1)
+        if txt.dim() == 3:
+            txt = txt[0]
+        return txt
+
+
+class ConvNextDetector:
+    """Detector wrapper for ConvNeXt-based classifiers trained within EcoGrow."""
+
+    def __init__(
+        self,
+        classes: Sequence[str],
+        *,
+        model_name: str = "convnext_small",
+        pretrained: bool = True,
+        device: torch.device | str = "cpu",
+        preprocess=None,
+        train_backbone: bool = False,
+        drop_rate: float = 0.0,
+        **model_kwargs,
+    ) -> None:
+        self.classes = list(classes)
+        self.device = torch.device(device)
+        self.preprocess = preprocess
+        self.train_backbone = bool(train_backbone)
+
+        self.model = timm.create_model(
+            model_name,
+            pretrained=pretrained,
+            num_classes=len(self.classes),
+            drop_rate=drop_rate,
+            **model_kwargs,
+        )
+        self.model.to(self.device)
+
+        if not self.train_backbone:
+            self._freeze_backbone()
+
+    def parameters(self) -> Iterable[nn.Parameter]:
+        return self.model.parameters()
+    
+    def load_state_dict(self, state_dict: dict, strict: bool = True) -> None:
+        self.model.load_state_dict(state_dict, strict=strict)
+
+    def logits(self, images: torch.Tensor, *, require_grad: bool = False) -> torch.Tensor:
+        images = images.to(self.device)
+        if require_grad:
+            self.model.train(self.train_backbone)
+            return self.model(images)
+        self.model.eval()
+        with torch.no_grad():
+            return self.model(images)
+
+    def predict(self, tensor: torch.Tensor, *, unknown_threshold: float = 0.0) -> Dict[str, object]:
+        with torch.no_grad():
+            logits = self.logits(tensor, require_grad=False)
+            probs = logits.softmax(dim=-1).squeeze(0)
+
+        top_prob, top_idx = probs.max(dim=0)
+        raw_label = self.classes[top_idx.item()]
+        probability = float(top_prob.item())
+        label = raw_label if probability >= float(unknown_threshold) else "unknown"
+
+        per_class = [
+            {"label": cls, "probability": float(probs[i].item())}
+            for i, cls in enumerate(self.classes)
+        ]
+        per_class.sort(key=lambda item: item["probability"], reverse=True)
+
+        return {
+            "detector": self.name,
             "family": self.name,
             "prediction": label,
             "raw_label": raw_label,
@@ -391,3 +532,19 @@ class FamilyAdaptedClipDetector:
         }
 
     predict_batch = predict
+
+    def _freeze_backbone(self) -> None:
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        classifier = self._get_classifier()
+        for p in classifier.parameters():
+            p.requires_grad_(True)
+
+    def _get_classifier(self) -> nn.Module:
+        classifier = self.model.get_classifier()
+        if isinstance(classifier, nn.Module):
+            return classifier
+        # Some timm models return tensors; fall back to searching common attributes
+        if hasattr(self.model, "head") and isinstance(self.model.head, nn.Module):
+            return self.model.head
+        raise RuntimeError("Unable to locate ConvNeXt classifier head.")
