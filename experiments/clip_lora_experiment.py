@@ -233,7 +233,7 @@ def main() -> Dict[str, Dict[str, object]]:
 
     result = benchmark.run(
         trainer=trainer,
-        segment_fn=segment_fn,
+        segment_fn=None,
         perc_eval=None,
         fit_predictor_args=fit_args,
     )

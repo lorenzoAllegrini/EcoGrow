@@ -80,22 +80,34 @@ class DatasetCleaner:
         test_ratio: float = 0.1, 
         emb_size: int = 384,
         threshold: float = 0.9,
+        splits: int = 1,
+        seed: int = 42,
     ) -> None:
         
         self.base_dir = base_dir = Path(str(PROJECT_ROOT / base_dir)).expanduser().resolve()
         if not base_dir.exists():
             raise FileNotFoundError(f"Base directory '{base_dir}' not found.")
         self.all_dir = Path(str(self.base_dir / all_dir)).expanduser().resolve()
-        self.train_dir = Path(str(self.base_dir / train_dir)).expanduser().resolve()
-        self.val_dir = Path(str(self.base_dir / val_dir)).expanduser().resolve()
+        base_train = Path(str(self.base_dir / train_dir)).expanduser().resolve()
+        base_val = Path(str(self.base_dir / val_dir)).expanduser().resolve()
         self.test_dir = Path(str(self.base_dir / test_dir)).expanduser().resolve()
         self.image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
         self.source_splits = source_splits
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
+        if splits < 1:
+            raise ValueError("'splits' must be >= 1.")
+        self.splits = int(splits)
+        self.seed = int(seed)
         self.emb_size = emb_size
         self.threshold = threshold
+
+        self.train_dirs = self._expand_split_dirs(base_train, self.splits)
+        self.val_dirs = self._expand_split_dirs(base_val, self.splits)
+        # Backwards compatibility for single split references
+        self.train_dir = self.train_dirs[0]
+        self.val_dir = self.val_dirs[0]
 
         self.faiss_index = None
 
@@ -171,6 +183,14 @@ class DatasetCleaner:
         self.faiss_index = faiss_index
         print("All images copied to ALL/ with preserved structure.\n")
     
+    @staticmethod
+    def _expand_split_dirs(base_dir: Path, splits: int) -> List[Path]:
+        if splits <= 1:
+            return [base_dir]
+        return [
+            base_dir.parent / f"{base_dir.name}_{idx+1}"
+            for idx in range(splits)
+        ]
 
     def build_similarity_clusters(self) -> Dict[int, List[Path]]:
 
@@ -259,12 +279,19 @@ class DatasetCleaner:
         """Create clean train/val/test splits from the deduplicated ALL directory,
             leakage safe
         """
-        print("Creating clean train/val/test splits (preserving class subfolders, cluster-safe)...")
+        print(
+            f"Creating clean train/val/test splits (cluster-safe) with {self.splits} "
+            f"train/val split(s)..."
+        )
 
-        for target in (self.train_dir, self.val_dir, self.test_dir):
+        for target in list(self.train_dirs) + list(self.val_dirs):
             if target.exists():
                 shutil.rmtree(target)
             target.mkdir(parents=True, exist_ok=True)
+
+        if self.test_dir.exists():
+            shutil.rmtree(self.test_dir)
+        self.test_dir.mkdir(parents=True, exist_ok=True)
 
         lower_exts = tuple(ext.lower() for ext in self.image_extensions)
 
@@ -293,35 +320,51 @@ class DatasetCleaner:
                 group_to_images.setdefault(gid, []).append(img)
 
             group_ids = list(group_to_images.keys())
+            per_split_assignments: List[Tuple[List[int], List[int]]] = []
 
-            # --- 2) splitto i cluster, non le singole immagini ---
             if len(group_ids) < 3 or (self.val_ratio + self.test_ratio) == 0:
-                train_groups, val_groups, test_groups = group_ids, [], []
+                test_groups: List[int] = []
+                per_split_assignments = [(group_ids, []) for _ in range(self.splits)]
             else:
-                # prima split train vs (val+test)
-                train_groups, temp_groups = self._simple_train_test_split(
-                    group_ids, test_size=self.val_ratio + self.test_ratio
-                )
-                if not temp_groups:
-                    val_groups, test_groups = [], []
-                elif self.val_ratio == 0:
-                    val_groups, test_groups = [], temp_groups
-                elif self.test_ratio == 0:
-                    val_groups, test_groups = temp_groups, []
-                else:
-                    # split del blocco temp tra val e test
-                    relative = self.test_ratio / (self.test_ratio + self.val_ratio)
-                    val_groups, test_groups = self._simple_train_test_split(
-                        temp_groups, test_size=relative
+                if self.test_ratio > 0:
+                    trainval_groups, test_groups = self._simple_train_test_split(
+                        group_ids,
+                        test_size=self.test_ratio,
+                        seed=self.seed,
                     )
+                else:
+                    trainval_groups, test_groups = group_ids, []
 
-            train_imgs = [img for gid in train_groups for img in group_to_images[gid]]
-            val_imgs   = [img for gid in val_groups   for img in group_to_images[gid]]
-            test_imgs  = [img for gid in test_groups  for img in group_to_images[gid]]
+                total_tv = self.train_ratio + self.val_ratio
+                if total_tv <= 0 or not trainval_groups:
+                    per_split_assignments = [(trainval_groups, []) for _ in range(self.splits)]
+                else:
+                    val_fraction = self.val_ratio / total_tv if total_tv > 0 else 0.0
+                    for split_idx in range(self.splits):
+                        current_seed = self.seed + split_idx + 1
+                        if val_fraction <= 0 or len(trainval_groups) < 2:
+                            train_groups = trainval_groups
+                            val_groups = []
+                        elif val_fraction >= 1.0:
+                            train_groups = []
+                            val_groups = trainval_groups
+                        else:
+                            train_groups, val_groups = self._simple_train_test_split(
+                                trainval_groups,
+                                test_size=val_fraction,
+                                seed=current_seed,
+                            )
+                        per_split_assignments.append((train_groups, val_groups))
 
-            self._copy_images(train_imgs, self.train_dir, self.all_dir)
-            self._copy_images(val_imgs,   self.val_dir,   self.all_dir)
-            self._copy_images(test_imgs,  self.test_dir,  self.all_dir)
+            for split_idx, (train_root, val_root) in enumerate(zip(self.train_dirs, self.val_dirs)):
+                train_groups, val_groups = per_split_assignments[split_idx]
+                train_imgs = [img for gid in train_groups for img in group_to_images[gid]]
+                val_imgs = [img for gid in val_groups for img in group_to_images[gid]]
+                self._copy_images(train_imgs, train_root, self.all_dir)
+                self._copy_images(val_imgs, val_root, self.all_dir)
+
+            test_imgs = [img for gid in test_groups for img in group_to_images[gid]]
+            self._copy_images(test_imgs, self.test_dir, self.all_dir)
 
         print("Splits created successfully (cluster-safe)!\n")
 
@@ -401,7 +444,15 @@ class DatasetCleaner:
         lower_exts = tuple(ext.lower() for ext in self.image_extensions)
         seen: Dict[str, Path] = {}
 
-        split_roots = {"train": self.train_dir, "val": self.val_dir, "test": self.test_dir}
+        split_roots: Dict[str, Path] = {}
+        for idx, split_dir in enumerate(self.train_dirs, start=1):
+            split_name = "train" if self.splits == 1 else f"train_{idx}"
+            split_roots[split_name] = split_dir
+        for idx, split_dir in enumerate(self.val_dirs, start=1):
+            split_name = "val" if self.splits == 1 else f"val_{idx}"
+            split_roots[split_name] = split_dir
+        split_roots["test"] = self.test_dir
+
         for split_name, split_root in split_roots.items():
             if not split_root.exists():
                 continue
@@ -481,6 +532,12 @@ def _parse_args() -> argparse.Namespace:
         help="Portion of samples per class for the test split.",
     )
     parser.add_argument(
+        "--splits",
+        type=int,
+        default=1,
+        help="Number of train/val splits to create (>=1).",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -507,6 +564,8 @@ def main() -> None:
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
+        splits=args.splits,
+        seed=args.seed,
         threshold=0.9,  # usa la soglia predefinita o passa via CLI se la aggiungi
     )
     dataset_cleaner.create_splits()

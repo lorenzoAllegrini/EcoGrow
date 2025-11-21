@@ -113,6 +113,7 @@ class PlantData(Dataset):
         families: Optional[Sequence[str]] = None,
         train: bool = True,
         split: Optional[str] = None,
+        split_index: Optional[int] = None,
         segment_fn: Optional[Callable[[Image.Image], Image.Image]] = None,
         transform: Optional[Callable[[Image.Image], object]] = None,
         split_name: Optional[str] = None,
@@ -147,11 +148,35 @@ class PlantData(Dataset):
         else:
             resolved_split = split_name or ("train" if train else "test")
 
+        candidate_splits: List[str] = []
+
+        def _add_candidate(name: str) -> None:
+            if name not in candidate_splits:
+                candidate_splits.append(name)
+
+        if split_index is not None:
+            if resolved_split.endswith("_clean"):
+                _add_candidate(f"{resolved_split}_{split_index}")
+                base = resolved_split.removesuffix("_clean").rstrip("_")
+                if base:
+                    _add_candidate(f"{base}_clean_{split_index}")
+                    _add_candidate(f"{base}_{split_index}")
+            else:
+                _add_candidate(f"{resolved_split}_clean_{split_index}")
+                _add_candidate(f"{resolved_split}_{split_index}")
+
         # Preferisci sempre gli split \"*_clean\" se presenti nella root del dataset.
         if resolved_split in {"train", "val", "test"}:
-            clean_candidate = f"{resolved_split}_clean"
-            if (self.root / clean_candidate).is_dir():
-                resolved_split = clean_candidate
+            _add_candidate(f"{resolved_split}_clean")
+
+        _add_candidate(resolved_split)
+
+        for candidate in candidate_splits:
+            if (self.root / candidate).is_dir():
+                resolved_split = candidate
+                break
+        else:
+            resolved_split = candidate_splits[-1]
 
         self.split = resolved_split
         self.families: List[str] = []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Any
 
@@ -19,6 +20,42 @@ from tqdm.auto import tqdm
 class EpochMetrics:
     loss: float
     f1: float
+
+
+class _EarlyStoppingController:
+    def __init__(
+        self,
+        patience: Optional[int],
+        min_delta: Optional[float],
+        restore_best: bool,
+        snapshot_fn: Callable[[], Any],
+        restore_fn: Callable[[Any], None],
+    ) -> None:
+        self.patience = patience
+        self.min_delta = min_delta if min_delta is not None else 0.0
+        self.restore_best = restore_best
+        self.snapshot_fn = snapshot_fn
+        self.restore_fn = restore_fn
+        self.best_loss = float("inf")
+        self.epochs_since_improvement = 0
+        self.best_state = snapshot_fn() if restore_best else None
+
+    def update(self, loss: float) -> bool:
+        improved = loss < self.best_loss - self.min_delta
+        if improved:
+            self.best_loss = loss
+            self.epochs_since_improvement = 0
+            if self.restore_best and self.best_state is not None:
+                self.best_state = self.snapshot_fn()
+            return False
+        if self.patience is None:
+            return False
+        self.epochs_since_improvement += 1
+        return self.epochs_since_improvement >= self.patience
+
+    def restore(self) -> None:
+        if self.restore_best and self.best_state is not None:
+            self.restore_fn(self.best_state)
 
 
 
@@ -89,8 +126,28 @@ class ClipPromptEngine:
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         grad_clip: Optional[float] = None,
         log_fn: Optional[Callable[[str], None]] = print,
+        eval_loader=None,
+        patience_before_stopping: Optional[int] = None,
+        min_delta: Optional[float] = None,
+        restore_best: bool = False,
     ) -> List[Dict[str, Optional[EpochMetrics]]]:
         history: List[Dict[str, Optional[EpochMetrics]]] = []
+        should_track = (patience_before_stopping is not None) or restore_best
+        early_stopper: Optional[_EarlyStoppingController] = None
+        if should_track:
+            def _snapshot():
+                return copy.deepcopy(self.prompt_learner.state_dict())
+
+            def _restore(state):
+                self.prompt_learner.load_state_dict(state)
+
+            early_stopper = _EarlyStoppingController(
+                patience_before_stopping,
+                min_delta,
+                restore_best,
+                _snapshot,
+                _restore,
+            )
 
         for epoch in range(1, epochs + 1):
             train_metrics = self._run_train_epoch(
@@ -101,18 +158,39 @@ class ClipPromptEngine:
                 epochs=epochs,
             )
 
+            eval_metrics: Optional[EpochMetrics] = None
+            if eval_loader is not None and early_stopper is not None:
+                eval_metrics = self.eval(eval_loader)
+
             if scheduler is not None:
                 scheduler.step()
 
-           
             if log_fn is not None:
                 msg = (
                     f"epoch {epoch}/{epochs} | "
                     f"train loss {train_metrics.loss:.4f} f1 {train_metrics.f1:.3f}"
                 )
+                if eval_metrics is not None:
+                    msg += (
+                        f" | eval loss {eval_metrics.loss:.4f}"
+                        f" f1 {eval_metrics.f1:.3f}"
+                    )
                 log_fn(msg)
 
             history.append({"train": train_metrics})
+
+            if early_stopper is not None:
+                monitored = eval_metrics if eval_metrics is not None else train_metrics
+                if early_stopper.update(monitored.loss):
+                    if log_fn is not None:
+                        log_fn(
+                            f"Early stopping triggered at epoch {epoch}"
+                            f" (patience={patience_before_stopping})"
+                        )
+                    break
+
+        if early_stopper is not None:
+            early_stopper.restore()
         return history
 
     def _run_train_epoch(
@@ -271,7 +349,11 @@ class ClipFineTuneEngine:
         grad_clip: Optional[float] = None,
         log_fn: Optional[Callable[[str], None]] = print,
         log_priors = None,
-        tau: float = 1.0
+        tau: float = 1.0,
+        eval_loader=None,
+        patience_before_stopping: Optional[int] = None,
+        min_delta: Optional[float] = None,
+        restore_best: bool = False,
     ) -> List[Dict[str, Optional[EpochMetrics]]]:
         history: List[Dict[str, Optional[EpochMetrics]]] = []
 
@@ -288,6 +370,28 @@ class ClipFineTuneEngine:
         else:
             self._log_prior_bias = None
 
+        should_track = (patience_before_stopping is not None) or restore_best
+        early_stopper: Optional[_EarlyStoppingController] = None
+        if should_track:
+            def _snapshot_state():
+                state = {"detector": copy.deepcopy(self.detector.state_dict())}
+                if self.prompt_learner is not None:
+                    state["prompt"] = copy.deepcopy(self.prompt_learner.state_dict())
+                return state
+
+            def _restore_state(state):
+                self.detector.load_state_dict(state["detector"])
+                if self.prompt_learner is not None and "prompt" in state:
+                    self.prompt_learner.load_state_dict(state["prompt"])
+
+            early_stopper = _EarlyStoppingController(
+                patience_before_stopping,
+                min_delta,
+                restore_best,
+                _snapshot_state,
+                _restore_state,
+            )
+
         for epoch in range(1, epochs + 1):
             train_metrics = self._run_train_epoch(
                 optimizer,
@@ -299,15 +403,39 @@ class ClipFineTuneEngine:
                 epochs=epochs,
             )
 
+            eval_metrics: Optional[EpochMetrics] = None
+            if eval_loader is not None and early_stopper is not None:
+                eval_metrics = self.eval(eval_loader)
+
             if scheduler is not None:
                 scheduler.step()
 
             if log_fn is not None:
-                log_fn(
-                    f"epoch {epoch}/{epochs} | train loss {train_metrics.loss:.4f} f1 {train_metrics.f1:.3f}"
+                msg = (
+                    f"epoch {epoch}/{epochs} | "
+                    f"train loss {train_metrics.loss:.4f} f1 {train_metrics.f1:.3f}"
                 )
+                if eval_metrics is not None:
+                    msg += (
+                        f" | eval loss {eval_metrics.loss:.4f}"
+                        f" f1 {eval_metrics.f1:.3f}"
+                    )
+                log_fn(msg)
 
             history.append({"train": train_metrics})
+
+            if early_stopper is not None:
+                monitored = eval_metrics if eval_metrics is not None else train_metrics
+                if early_stopper.update(monitored.loss):
+                    if log_fn is not None:
+                        log_fn(
+                            f"Early stopping triggered at epoch {epoch}"
+                            f" (patience={patience_before_stopping})"
+                        )
+                    break
+
+        if early_stopper is not None:
+            early_stopper.restore()
         return history
 
     def _run_train_epoch(
@@ -460,8 +588,30 @@ class ConvNextFineTuneEngine:
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         grad_clip: Optional[float] = None,
         log_fn: Optional[Callable[[str], None]] = print,
+        eval_loader=None,
+        patience_before_stopping: Optional[int] = None,
+        min_delta: Optional[float] = None,
+        restore_best: bool = False,
     ) -> List[Dict[str, Optional[EpochMetrics]]]:
         history: List[Dict[str, Optional[EpochMetrics]]] = []
+
+        should_track = (patience_before_stopping is not None) or restore_best
+        early_stopper: Optional[_EarlyStoppingController] = None
+        if should_track:
+
+            def _snapshot_state():
+                return copy.deepcopy(self.detector.state_dict())
+
+            def _restore_state(state):
+                self.detector.load_state_dict(state)
+
+            early_stopper = _EarlyStoppingController(
+                patience_before_stopping,
+                min_delta,
+                restore_best,
+                _snapshot_state,
+                _restore_state,
+            )
 
         for epoch in range(1, epochs + 1):
             train_metrics = self._run_train_epoch(
@@ -472,15 +622,39 @@ class ConvNextFineTuneEngine:
                 epochs=epochs,
             )
 
+            eval_metrics: Optional[EpochMetrics] = None
+            if eval_loader is not None and early_stopper is not None:
+                eval_metrics = self.eval(eval_loader)
+
             if scheduler is not None:
                 scheduler.step()
 
             if log_fn is not None:
-                log_fn(
-                    f"epoch {epoch}/{epochs} | train loss {train_metrics.loss:.4f} f1 {train_metrics.f1:.3f}"
+                msg = (
+                    f"epoch {epoch}/{epochs} | "
+                    f"train loss {train_metrics.loss:.4f} f1 {train_metrics.f1:.3f}"
                 )
+                if eval_metrics is not None:
+                    msg += (
+                        f" | eval loss {eval_metrics.loss:.4f}"
+                        f" f1 {eval_metrics.f1:.3f}"
+                    )
+                log_fn(msg)
 
             history.append({"train": train_metrics})
+
+            if early_stopper is not None:
+                monitored = eval_metrics if eval_metrics is not None else train_metrics
+                if early_stopper.update(monitored.loss):
+                    if log_fn is not None:
+                        log_fn(
+                            f"Early stopping triggered at epoch {epoch}"
+                            f" (patience={patience_before_stopping})"
+                        )
+                    break
+
+        if early_stopper is not None:
+            early_stopper.restore()
         return history
 
     def _run_train_epoch(

@@ -119,6 +119,9 @@ class EcogrowBenchmark:
         num_workers = fit_args.pop("num_workers", 0)
         pin_memory = fit_args.pop("pin_memory", False)
         drop_last = fit_args.pop("drop_last", False)
+        patience_before_stopping = fit_args.pop("patience_before_stopping", None)
+        min_delta = fit_args.pop("min_delta", None)
+        restore_best = fit_args.pop("restore_best", False)
 
         if fit_args:
             unknown = ", ".join(sorted(fit_args.keys()))
@@ -178,6 +181,10 @@ class EcogrowBenchmark:
             scheduler=scheduler,
             grad_clip=grad_clip,
             log_fn=log_fn,
+            eval_loader=eval_loader,
+            patience_before_stopping=patience_before_stopping,
+            min_delta=min_delta,
+            restore_best=restore_best,
         )
         eval_metrics: Optional[EpochMetrics] = None
         if eval_loader is not None and hasattr(trainer, "eval"):
