@@ -17,10 +17,13 @@ roboflow = ">=1.1.22"
 onnxruntime = { version = ">=1.15.0", markers = "platform_system != 'Darwin'" }
 onnxruntime-silicon = { version = ">=1.15.0", markers = "platform_system == 'Darwin'" }
 torch = "^2.9.0"
+torchvision = ">=0.16.0"
 tokenizers = "0.19.1"
 transformers = ">=4.44,<4.46"
 peft = "^0.17.1"
 huggingface-hub = ">=0.24.0,<1.0.0"
+tqdm = ">=4.67.0"
+timm = ">=1.0.0"
 
 [build-system]
 requires = ["poetry-core>=1.8.0"]

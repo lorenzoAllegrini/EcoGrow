@@ -1,5 +1,5 @@
 {
-  "snake_plant": {
+  "Asparagaceae": {
       "healthy": [
           "upright thick leathery leaves; deep green with variegated bands; smooth glossy surface; firm turgid tissue",
           "Healthy snake plant leaf with thick upright structure, deep green coloration featuring distinct variegated bands, glossy surface, and firm turgid tissue without signs of damage or discoloration."
@@ -11,15 +11,8 @@
       "leaf_withering": [
           "loss of turgor; leaf curling; faded green color; soft drooping lamina; progressive tissue collapse",
           "Snake plant leaf exhibiting withering symptoms, characterized by loss of firmness and turgor, downward curling, dull faded green coloration, and progressive soft collapse of the lamina often due to dehydration or root stress."
-      ]
-  },
-
-  "spider_plant": {
-      "healthy": [
-          "vivid arching green leaves; smooth glossy lamina; firm turgid tissue; white variegation uniform",
-          "Healthy spider plant leaf with arching shape, glossy green surface, and consistent white variegation along the midrib."
       ],
-      "generic_fungal_leaf_spot": [  
+      "fungal_leaf_spot": [  
           "small circular brown lesions; grayish centers; yellowish margins; coalescing spots on lamina; slight curling",
           "Spider plant leaf affected by fungal leaf spot, showing small circular brown lesions with grayish centers and yellow halos that may merge, often causing slight curling of the affected area."
       ],
@@ -28,8 +21,7 @@
           "Spider plant leaf with necrosis, characterized by dark, brittle dead tissue spreading from the leaf tip or margins with sharply defined borders."
       ]
   },
-
-  "money_plant": {
+  "Araceae": {
       "healthy": [
           "vivid green; smooth waxy sheen; firm turgid tissue; intact heart-shaped margins",
           "Healthy money plant leaf with vivid green color, waxy surface, and intact margins."
@@ -48,7 +40,7 @@
       ]
   },
 
-  "chrysanthemum": {
+  "Asteraceae": {
       "healthy": [
           "vivid green lamina; smooth turgid texture; crisp serrated margins; no lesions",
           "Healthy chrysanthemum leaf with vivid green color, firm texture, and no visible lesions."
@@ -63,7 +55,7 @@
       ]
   },
 
-  "hibiscus": {
+  "Malvaceae": {
       "healthy": [
           "uniform glossy green; smooth waxy surface; firm turgor; intact margins",
           "Healthy hibiscus leaf with glossy green surface, firm texture, and intact edges."
@@ -82,7 +74,7 @@
       ]
   },
 
-  "rose": {
+  "Rosaceae": {
       "healthy": [
           "deep green leaflets; smooth slightly glossy surface; intact serrations; no lesions",
           "Healthy rose leaf with deep green, slightly glossy leaflets and intact serrated edges."
@@ -117,7 +109,7 @@
       ]
   },
 
-  "turmeric": {
+  "Zingiberaceae": {
       "healthy": [
           "uniform lush green; smooth broad lamina; firm texture; no lesions",
           "Healthy turmeric leaf with lush green color, broad smooth lamina, and no visible lesions."
@@ -134,13 +126,13 @@
           "apical tip burn; marginal necrosis; dark brittle tissue; sharp transition line",
           "Turmeric leaf exhibiting leaf necrosis, with tip burn, marginal browning, and brittle dark tissue."
       ],
-      "generic_fungal_leaf_spot": [ 
+      "fungal_leaf_spot": [ 
           "small brown circular to irregular spots; chlorotic halos; merging into larger patches",
           "Turmeric leaf with leaf spot disease, presenting small brown lesions with chlorotic halos that can merge into larger patches."
       ]
   },
 
-  "aloe": {
+  "Asphodelaceae": {
       "healthy": [
           "uniform vibrant green; glossy smooth surface; firm turgid tissue; intact margins; no spots or discoloration",
           "Healthy Aloe vera leaf with uniform green color, glossy surface, firm texture, and intact margins."

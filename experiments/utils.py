@@ -94,9 +94,9 @@ def compute_class_ctx(
     return ctx_stack
 
 
-def export_family_embeddings(
+def export_detector_embeddings(
     out_path: Path,
-    family_name: str,
+    detector_name: str,
     class_order: Iterable[str],
     prompt_learner: ClipPromptLearner,
     text_encoder: TextEncoderOpenCLIP,
@@ -108,7 +108,7 @@ def export_family_embeddings(
         text_features = F.normalize(text_features, dim=-1)
 
     payload = {
-        "family": family_name,
+        "detector": detector_name,
         "classes": list(class_order),
         "text_features": text_features.cpu(),
         "temperature": float(temperature),
@@ -116,6 +116,43 @@ def export_family_embeddings(
     torch.save(payload, out_path)
     return payload
 
+
+def save_lora_adapter(
+    module: torch.nn.Module,
+    config,
+    save_dir: Path,
+    filename: str = "adapter.pt",
+) -> Path:
+    """
+    Salva solo i pesi addestrabili (LoRA) di un modulo PEFT.
+
+    Viene creato un payload con:
+      - state_dict: solo i parametri con requires_grad=True
+      - config: dizionario della LoraConfig associata
+    """
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    trainable_param_names = {
+        name for name, p in module.named_parameters() if p.requires_grad
+    }
+    full_state = module.state_dict()
+    adapter_state = {
+        k: v.detach().cpu() for k, v in full_state.items() if k in trainable_param_names
+    }
+
+    if hasattr(config, "to_dict"):
+        cfg = config.to_dict()  # type: ignore[assignment]
+    else:
+        cfg = dict(config.__dict__)
+
+    payload = {
+        "peft_type": "LORA",
+        "config": cfg,
+        "state_dict": adapter_state,
+    }
+    path = save_dir / filename
+    torch.save(payload, path)
+    return path
 def list_leaf_modules(model):
     leaves = []
     for name, module in model.named_modules():
@@ -125,4 +162,10 @@ def list_leaf_modules(model):
     return leaves
 
 
-__all__ = ["export_family_embeddings", "compute_init_ctx", "compute_class_ctx", "list_leaf_modules"]
+__all__ = [
+    "export_detector_embeddings",
+    "compute_init_ctx",
+    "compute_class_ctx",
+    "list_leaf_modules",
+    "save_lora_adapter",
+]

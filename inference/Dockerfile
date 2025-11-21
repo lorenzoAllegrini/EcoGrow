@@ -23,9 +23,11 @@ RUN python -m pip install --upgrade pip \
 
 COPY . /app
 
-ENV ECOGROW_EMBEDDINGS_DIR=/app/artifacts \
-    ECOGROW_CLIP_MODEL_NAME=ViT-B-32 \
-    ECOGROW_CLIP_PRETRAINED=laion2b_s34b_b79k \
+RUN mkdir -p /app/artifacts/embeddings /app/artifacts/pretrained
+
+ENV ECOGROW_EMBEDDINGS_DIR=/app/artifacts/embeddings \
+    ECOGROW_CLIP_MODEL_NAME=MobileCLIP-S2 \
+    ECOGROW_MODEL_CACHE=/app/artifacts/pretrained \
     ECOGROW_SEGMENTATION=1
 
 EXPOSE 8000

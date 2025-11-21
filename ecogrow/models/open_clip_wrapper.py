@@ -476,6 +476,8 @@ class ConvNextDetector:
     ) -> None:
         self.classes = list(classes)
         self.device = torch.device(device)
+        # Nome leggibile usato da trainer e logging
+        self.name = model_name
         self.preprocess = preprocess
         self.train_backbone = bool(train_backbone)
 

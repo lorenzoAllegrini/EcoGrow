@@ -1,294 +1,516 @@
 #!/usr/bin/env python3
-"""Utility script to reshape a Roboflow export into the EcoGrow layout.
+"""Utility script to clean EcoGrow datasets by removing duplicates and re-splitting data.
 
-Adds creation of a validation split (default 0.2) in addition to train/test.
-Supports Roboflow exports both with and without existing splits.
+The workflow mirrors the script shared by the user:
+
+1. Collects every image from the raw `train/`, `val/`, `test/` directories into a single
+   `all/` directory while preserving the relative tree.
+2. Removes perfect duplicates across the aggregated `all/` directory by hashing files.
+3. Recreates clean train/val/test splits from the deduplicated pool, preserving class paths.
+4. Verifies that no duplicate hashes leak across the new splits.
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
-from typing import Set, Tuple
-import shutil
+import hashlib
+import os
 import random
+import shutil
+from math import ceil, isclose
+from pathlib import Path
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple, Any
+import numpy as np
+from PIL import Image
+from tqdm import tqdm
+from torchvision import transforms
+import torch
+import torch.nn.functional as F
 
-
+# riduci il numero di thread per limitare conflitti/lanci simultanei di OpenMP
+torch.set_num_threads(1)
+import faiss
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-from ecogrow.data.plant_data import (  # noqa: E402
-    DEFAULT_SPECIES,
-    DEFAULT_DISEASES,
-)
+DEFAULT_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-# Local image extensions for file detection during formatting
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+"""model = torch.hub.load(
+    'facebookresearch/dinov2', 
+    'dinov2_vits14'   # questa è la variante ViT-S/14
+).to(device)
 
 
-def dataset_formatting(
-    init_root: str,
-    final_root: str,
-    default_species: Set[str] = DEFAULT_SPECIES,
-    default_diseases: Set[str] = DEFAULT_DISEASES,
-    *,
-    overwrite: bool = False,
-    test_ratio: float = 0.20,
-    val_ratio: float = 0.20,
-    seed: int = 1337,
-) -> None:
-    """Convert a Roboflow folder export (con o senza split) nel layout EcoGrow.
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406], 
+        std=[0.229, 0.224, 0.225],
+    ),
+])
 
-    Crea sempre tre split in output: `train/`, `val/`, `test/`.
+index = faiss.IndexFlatIP(emb.shape[1])     # cosine similarity se normalizzati
+index.add(emb)
 
-    - Con split in input (cartelle train/valid|val/test):
-      - Mappa `train` -> train, `valid|val` -> val, `test` -> test.
-      - Se `valid/val` mancano, ricava `val` da `train` con `val_ratio` per classe.
-    - Senza split in input (flat o annidato):
-      - Effettua split per classe: prima `test` con `test_ratio`, poi `val` con `val_ratio` dal rimanente.
+k = 5
+D, I = index.search(emb, k)  # D: similarità, I: indici
+Ora hai:
 
-    Args:
-        init_root: percorso sorgente (Roboflow export).
-        final_root: cartella destinazione formattata per EcoGrow.
-        default_species: insiemi di specie riconosciute nel nome classe.
-        default_diseases: insiemi di malattie/condizioni riconosciute nel nome classe.
-        overwrite: se True sovrascrive file con lo stesso nome in destinazione.
-        test_ratio: porzione destinata a test quando si genera lo split.
-        val_ratio: porzione del rimanente destinata a validation quando si genera lo split.
-        seed: seme per randomizzazione deterministica.
-    """
+I[i] = immagini più simili a immagine i
 
-    src_root = Path(init_root).expanduser().resolve()
-    dst_root = Path(final_root).expanduser().resolve()
-    if not src_root.is_dir():
-        raise FileNotFoundError(f"Sorgente '{src_root}' non trovata.")
-    dst_root.mkdir(parents=True, exist_ok=True)
+D[i] = quanto sono simili
 
-    rnd = random.Random(seed)
+"""
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-    def resolve_family_and_disease(name: str) -> Tuple[str, str]:
-        clean = name.replace("-", "_").replace(" ", "_").strip("_")
-        lower = clean.lower()
-        s = None
-        d = None
-        for specie in default_species:
-            if specie in lower:
-                s = specie
-        for disease in default_diseases:
-            if disease in lower:
-                d = disease
-        if not s:
-            raise ValueError(f"Specie non supportata in '{lower}'")
-        if not d:
-            raise ValueError(f"Malattia/condizione non supportata in '{lower}'")
-        return s, d
+class DatasetCleaner:
+    def __init__(
+        self,
+        base_dir: str = "datasets",
+        all_dir: str = "all",
+        train_dir: str = "train",
+        val_dir: str = "val",
+        test_dir: str = "test",
+        source_splits: Tuple[str, str, str] = ("train", "val", "test"),
+        train_ratio: float = 0.8,
+        val_ratio: float = 0.1,
+        test_ratio: float = 0.1, 
+        emb_size: int = 384,
+        threshold: float = 0.9,
+    ) -> None:
+        
+        self.base_dir = base_dir = Path(str(PROJECT_ROOT / base_dir)).expanduser().resolve()
+        if not base_dir.exists():
+            raise FileNotFoundError(f"Base directory '{base_dir}' not found.")
+        self.all_dir = Path(str(self.base_dir / all_dir)).expanduser().resolve()
+        self.train_dir = Path(str(self.base_dir / train_dir)).expanduser().resolve()
+        self.val_dir = Path(str(self.base_dir / val_dir)).expanduser().resolve()
+        self.test_dir = Path(str(self.base_dir / test_dir)).expanduser().resolve()
+        self.image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
+        self.source_splits = source_splits
+        self.train_ratio = train_ratio
+        self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
+        self.emb_size = emb_size
+        self.threshold = threshold
 
-    def iter_images(dir_path: Path):
-        for p in dir_path.iterdir():
-            if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS:
-                yield p
+        self.faiss_index = None
 
-    def dir_has_images(dir_path: Path) -> bool:
-        return any(
-            p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS for p in dir_path.iterdir()
-        )
+        self.device = ("cuda" if torch.cuda.is_available() else "cpu")
 
-    def safe_copy(src: Path, dst: Path):
-        target = dst
-        if target.exists():
-            if overwrite:
-                target.unlink()
-            else:
-                stem, ext = target.stem, target.suffix
-                k = 1
-                while target.exists():
-                    target = target.with_name(f"{stem}_{k}{ext}")
-                    k += 1
-        shutil.copy2(src, target)
+        self.model = torch.hub.load(
+            'facebookresearch/dinov2', 
+            'dinov2_vits14'   
+        ).to(self.device)
 
-    split_names = {"train", "valid", "val", "test"}
-    has_splits = any(d.is_dir() and d.name.lower() in split_names for d in src_root.iterdir())
+        self.transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406], 
+                std=[0.229, 0.224, 0.225],
+            ),
+        ])
 
-    if has_splits:
-        has_val_folder = any(
-            d.is_dir() and d.name.lower() in {"valid", "val"} for d in src_root.iterdir()
-        )
+        self.collect_all_images_and_embed()
+        self.remove_duplicates()
+        self.original_image_groups = self.build_similarity_clusters()
 
-        # 1) Copy train/val/test if present, keeping val separate
-        for split_dir in src_root.iterdir():
-            if not split_dir.is_dir():
+        self.path_to_group = {}
+        for gid, paths in self.original_image_groups.items():
+            for p in paths:
+                # assicurati che sia lo stesso tipo di Path di self.all_dir
+                self.path_to_group[Path(p)] = gid
+
+        
+
+    def collect_all_images_and_embed(self) -> None:
+        self.all_dir.mkdir(parents=True, exist_ok=True)
+        print("\nCollecting all images into ALL/ preserving subfolders...")
+
+        faiss_index = faiss.IndexFlatIP(self.emb_size)
+        self.index_paths = []
+        self.embeddings = []  # 👈 qui
+
+        lower_exts = tuple(ext.lower() for ext in self.image_extensions)
+        for split in self.source_splits:
+            split_path = self.base_dir / split
+            if not split_path.exists():
                 continue
-            name_l = split_dir.name.lower()
-            if name_l not in split_names:
-                continue
-            if name_l in {"valid", "val"}:
-                target_split = "val"
-            else:
-                target_split = name_l  # 'train' or 'test'
 
-            for class_dir in split_dir.iterdir():
-                if not class_dir.is_dir():
+            walker = tqdm(os.walk(split_path), desc=f"Walking {split}", unit="dir")
+            for root, _, files in walker:
+                root_path = Path(root)
+                rel_root = root_path.relative_to(split_path)
+                dst_root = self.all_dir / rel_root if rel_root != Path(".") else self.all_dir
+                dst_root.mkdir(parents=True, exist_ok=True)
+
+                for fname in files:
+                    if not fname.lower().endswith(lower_exts):
+                        continue
+                    src_path = root_path / fname
+
+                    img = Image.open(src_path).convert("RGB")
+                    emb = self.embed_image(img)          # [1, emb_size]
+                    emb_np = emb.detach().cpu().float().numpy()  # (1, D)
+                    faiss_index.add(emb_np)
+
+                    self.embeddings.append(emb_np)  # 👈 salviamo
+
+                    dst_path = dst_root / fname
+                    DatasetCleaner._copy_with_suffix(src_path, dst_path)
+                    self.index_paths.append(dst_path)
+
+        # mappa path → indice nell'index
+        self.embeddings = np.vstack(self.embeddings).astype("float32")  # (N, D) 👈
+        self.path_to_index = {p: i for i, p in enumerate(self.index_paths)}
+        self.faiss_index = faiss_index
+        print("All images copied to ALL/ with preserved structure.\n")
+    
+
+    def build_similarity_clusters(self) -> Dict[int, List[Path]]:
+
+        if self.faiss_index is None or not hasattr(self, "embeddings"):
+            raise RuntimeError("FAISS index / embeddings non inizializzati")
+
+        embeddings = self.embeddings  # (N, D)
+        N = embeddings.shape[0]
+
+        D, I = self.faiss_index.search(embeddings, N)  # D, I: (N, N)
+
+        adj = [[] for _ in range(N)]
+
+        for i in range(N):
+            sims = D[i]
+            idxs = I[i]
+            for j, sim in zip(idxs, sims):
+                if j == i:
+                    continue  # salta se stesso
+                if sim < self.threshold:
+                    # I risultati sono ordinati per similarità decrescente:
+                    # appena scendiamo sotto la soglia possiamo interrompere.
+                    break
+                adj[i].append(j)
+                adj[j].append(i)  # grafo non diretto
+
+        visited = [False] * N
+        clusters: Dict[int, List[Path]] = {}
+        cluster_id = 0
+
+        for i in range(N):
+            if visited[i]:
+                continue
+            # Avvia un nuovo cluster
+            queue = [i]
+            visited[i] = True
+            current_paths: List[Path] = []
+
+            while queue:
+                u = queue.pop()
+                current_paths.append(self.index_paths[u])
+                for v in adj[u]:
+                    if not visited[v]:
+                        visited[v] = True
+                        queue.append(v)
+
+            clusters[cluster_id] = current_paths
+            cluster_id += 1
+
+        return clusters
+
+
+    def remove_duplicates(self) -> int:
+        """Remove files with duplicate hashes across the aggregated ALL/ directory."""
+        print("Removing exact duplicates (MD5) across ALL/ ...")
+        lower_exts = tuple(ext.lower() for ext in self.image_extensions)
+        hash_map: Dict[str, Path] = {}
+        removed = 0
+
+        for leaf in tqdm(self._iter_leaf_dirs(lower_exts), desc="Scanning leaf classes", unit="class"):
+            class_path = self.all_dir / leaf
+            leaf_label = "." if str(leaf) == "." else str(leaf)
+            for fname in tqdm(sorted(os.listdir(class_path)), desc=f"Files in {leaf_label}", leave=False):
+                if not fname.lower().endswith(lower_exts):
                     continue
-                specie_name, disease_name = resolve_family_and_disease(class_dir.name)
-                dest_dir = dst_root / target_split / specie_name / disease_name
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                for img_path in iter_images(class_dir):
-                    safe_copy(img_path, dest_dir / img_path.name)
+                fpath = class_path / fname
+                if not fpath.is_file():
+                    continue
+                try:
+                    digest = self.file_hash(fpath)
+                except Exception as exc:  # pragma: no cover - informational
+                    print(f"Warning: cannot hash {fpath}: {exc}")
+                    continue
 
-        # 2) If no explicit val in input, split part of train into val per-class
-        if not has_val_folder:
-            # Build a per-class list of files under output train, then move a portion to val
-            train_root = dst_root / "train"
-            if train_root.is_dir():
-                for specie_dir in train_root.iterdir():
-                    if not specie_dir.is_dir():
-                        continue
-                    for disease_dir in specie_dir.iterdir():
-                        if not disease_dir.is_dir():
-                            continue
-                        imgs = [p for p in disease_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
-                        imgs.sort(key=lambda p: p.name)
-                        rnd.shuffle(imgs)
-                        n_total = len(imgs)
-                        n_val = int(round(n_total * val_ratio))
-                        val_subset = imgs[:n_val]
-                        val_dest = dst_root / "val" / specie_dir.name / disease_dir.name
-                        val_dest.mkdir(parents=True, exist_ok=True)
-                        for p in val_subset:
-                            safe_copy(p, val_dest / p.name)
-                            if not overwrite:
-                                # Keep original under train if not overwriting; if overwriting, move semantics
-                                continue
-                            # If overwriting, remove from train to avoid duplication
-                            try:
-                                p.unlink()
-                            except Exception:
-                                pass
-    else:
-        # No input split: create train/val/test by splitting per-class
-        for top_dir in src_root.iterdir():
-            if not top_dir.is_dir():
+                if digest in hash_map:
+                    fpath.unlink()
+                    removed += 1
+                else:
+                    hash_map[digest] = fpath
+
+        print(f"Duplicate removal complete. Removed: {removed} files.\n")
+        return removed
+    
+
+    def create_splits(self) -> None:
+        """Create clean train/val/test splits from the deduplicated ALL directory,
+            leakage safe
+        """
+        print("Creating clean train/val/test splits (preserving class subfolders, cluster-safe)...")
+
+        for target in (self.train_dir, self.val_dir, self.test_dir):
+            if target.exists():
+                shutil.rmtree(target)
+            target.mkdir(parents=True, exist_ok=True)
+
+        lower_exts = tuple(ext.lower() for ext in self.image_extensions)
+
+        path_to_group: Dict[Path, int] = {}
+        for gid, paths in self.original_image_groups.items():
+            for p in paths:
+                path_to_group[Path(p)] = gid
+
+        for leaf in tqdm(self._iter_leaf_dirs(), desc="Splitting leaf classes", unit="class"):
+            class_src = self.all_dir / leaf
+            images = [
+                class_src / fname
+                for fname in os.listdir(class_src)
+                if fname.lower().endswith(lower_exts) and (class_src / fname).is_file()
+            ]
+            if not images:
                 continue
 
-            if dir_has_images(top_dir):
-                specie_name, disease_name = resolve_family_and_disease(top_dir.name)
-                imgs = list(iter_images(top_dir))
-                imgs.sort(key=lambda p: p.name)
-                rnd.shuffle(imgs)
+            group_to_images: Dict[int, List[Path]] = {}
+            next_fake_gid = -1 
+            for img in images:
+                gid = path_to_group.get(img)
+                if gid is None:
+                    gid = next_fake_gid
+                    next_fake_gid -= 1
+                group_to_images.setdefault(gid, []).append(img)
 
-                n_total = len(imgs)
-                n_test = int(round(n_total * test_ratio))
-                rem = n_total - n_test
-                n_val = int(round(rem * val_ratio))
+            group_ids = list(group_to_images.keys())
 
-                test_set = set(imgs[:n_test])
-                val_set = set(imgs[n_test : n_test + n_val])
-                train_set = imgs[n_test + n_val :]
-
-                for img_path in train_set:
-                    dest_dir = dst_root / "train" / specie_name / disease_name
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    safe_copy(img_path, dest_dir / img_path.name)
-                for img_path in val_set:
-                    dest_dir = dst_root / "val" / specie_name / disease_name
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    safe_copy(img_path, dest_dir / img_path.name)
-                for img_path in test_set:
-                    dest_dir = dst_root / "test" / specie_name / disease_name
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    safe_copy(img_path, dest_dir / img_path.name)
+            # --- 2) splitto i cluster, non le singole immagini ---
+            if len(group_ids) < 3 or (self.val_ratio + self.test_ratio) == 0:
+                train_groups, val_groups, test_groups = group_ids, [], []
             else:
-                # Nested layout: species/ -> disease/ -> images
-                for disease_dir in top_dir.iterdir():
-                    if not disease_dir.is_dir():
+                # prima split train vs (val+test)
+                train_groups, temp_groups = self._simple_train_test_split(
+                    group_ids, test_size=self.val_ratio + self.test_ratio
+                )
+                if not temp_groups:
+                    val_groups, test_groups = [], []
+                elif self.val_ratio == 0:
+                    val_groups, test_groups = [], temp_groups
+                elif self.test_ratio == 0:
+                    val_groups, test_groups = temp_groups, []
+                else:
+                    # split del blocco temp tra val e test
+                    relative = self.test_ratio / (self.test_ratio + self.val_ratio)
+                    val_groups, test_groups = self._simple_train_test_split(
+                        temp_groups, test_size=relative
+                    )
+
+            train_imgs = [img for gid in train_groups for img in group_to_images[gid]]
+            val_imgs   = [img for gid in val_groups   for img in group_to_images[gid]]
+            test_imgs  = [img for gid in test_groups  for img in group_to_images[gid]]
+
+            self._copy_images(train_imgs, self.train_dir, self.all_dir)
+            self._copy_images(val_imgs,   self.val_dir,   self.all_dir)
+            self._copy_images(test_imgs,  self.test_dir,  self.all_dir)
+
+        print("Splits created successfully (cluster-safe)!\n")
+
+
+    def file_hash(self, path: Path) -> str:
+        """Return the MD5 hash of a file, reading it in chunks."""
+        hasher = hashlib.md5()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(8192), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def embed_image(self, image: Image.Image) -> torch.Tensor:
+        img = self.transform(image).unsqueeze(0).to(self.device)  # [1, 3, 224, 224]
+        with torch.no_grad():
+            emb = self.model(img)          # [1, emb_size]
+            emb = F.normalize(emb, dim=-1) # normalizzato per cosine
+        return emb
+    
+    def _iter_leaf_dirs(self, lower_exts: Tuple[str, ...] | None = None) -> List[Path]:
+        """Return every directory relative to all_dir that contains at least one image."""
+        lower_exts = lower_exts or tuple(ext.lower() for ext in self.image_extensions)
+        leaf_dirs: List[Path] = []
+        for root, _, files in os.walk(self.all_dir):
+            if any(fname.lower().endswith(lower_exts) for fname in files):
+                rel_root = Path(root).relative_to(self.all_dir)
+                leaf_dirs.append(rel_root)
+        return sorted(leaf_dirs, key=lambda p: str(p))
+
+    @staticmethod
+    def _simple_train_test_split(
+        items: Sequence[Path],
+        *,
+        test_size: float,
+        seed: int = 42,
+    ) -> Tuple[List[Path], List[Path]]:
+        """Minimal train/test splitter to avoid depending on scikit-learn."""
+        if not 0 < test_size <= 1:
+            raise ValueError("test_size must be within (0, 1].")
+
+        samples = list(items)
+        if not samples:
+            return [], []
+
+        rng = random.Random(seed)
+        rng.shuffle(samples)
+        n_samples = len(samples)
+        n_test = max(1, min(n_samples, ceil(n_samples * test_size)))
+        test_subset = samples[:n_test]
+        train_subset = samples[n_test:]
+        return train_subset, test_subset
+
+    @staticmethod
+    def _copy_with_suffix(src_path: Path, dst_path: Path) -> None:
+        """Copy file to `dst_path`, appending suffixes when collisions occur."""
+        target = dst_path
+        if target.exists():
+            stem, ext = target.stem, target.suffix
+            count = 1
+            while target.exists():
+                target = target.with_name(f"{stem}_{count}{ext}")
+                count += 1
+        shutil.copy2(src_path, target)
+
+    def _copy_images(self, images: Iterable[Path], target_root: Path, all_root: Path) -> None:
+        """Copy images to the target split while preserving their relative subfolders."""
+        for img in images:
+            rel_subdir = img.parent.relative_to(all_root)
+            dst_dir = target_root / rel_subdir
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            DatasetCleaner._copy_with_suffix(img, dst_dir / img.name)
+
+
+    def verify_no_leakage(self) -> bool:
+        """Ensure that no duplicate hashes exist across the generated split directories."""
+        print("Final check: no duplicates across splits...")
+        lower_exts = tuple(ext.lower() for ext in self.image_extensions)
+        seen: Dict[str, Path] = {}
+
+        split_roots = {"train": self.train_dir, "val": self.val_dir, "test": self.test_dir}
+        for split_name, split_root in split_roots.items():
+            if not split_root.exists():
+                continue
+            for root, _, files in os.walk(split_root):
+                for fname in files:
+                    if not fname.lower().endswith(lower_exts):
                         continue
-                    if not dir_has_images(disease_dir):
+                    fpath = Path(root) / fname
+                    try:
+                        digest = self.file_hash(fpath)
+                    except Exception as exc:  # pragma: no cover - informational
+                        print(f"Warning hashing {fpath}: {exc}")
                         continue
-                    combined_name = f"{top_dir.name}_{disease_dir.name}"
-                    specie_name, disease_name = resolve_family_and_disease(combined_name)
+                    if digest in seen:
+                        print("LEAKAGE FOUND:")
+                        print(f"- {seen[digest]}")
+                        print(f"- {fpath}")
+                        return False
+                    seen[digest] = fpath
 
-                    imgs = list(iter_images(disease_dir))
-                    imgs.sort(key=lambda p: p.name)
-                    rnd.shuffle(imgs)
+        print("No duplicates across datasets. Dataset is clean!\n")
+        return True
 
-                    n_total = len(imgs)
-                    n_test = int(round(n_total * test_ratio))
-                    rem = n_total - n_test
-                    n_val = int(round(rem * val_ratio))
-
-                    test_set = set(imgs[:n_test])
-                    val_set = set(imgs[n_test : n_test + n_val])
-                    train_set = imgs[n_test + n_val :]
-
-                    for img_path in train_set:
-                        dest_dir = dst_root / "train" / specie_name / disease_name
-                        dest_dir.mkdir(parents=True, exist_ok=True)
-                        safe_copy(img_path, dest_dir / img_path.name)
-                    for img_path in val_set:
-                        dest_dir = dst_root / "val" / specie_name / disease_name
-                        dest_dir.mkdir(parents=True, exist_ok=True)
-                        safe_copy(img_path, dest_dir / img_path.name)
-                    for img_path in test_set:
-                        dest_dir = dst_root / "test" / specie_name / disease_name
-                        dest_dir.mkdir(parents=True, exist_ok=True)
-                        safe_copy(img_path, dest_dir / img_path.name)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Formatta un export Roboflow nella struttura dataset di EcoGrow."
+        description="Format and deduplicate EcoGrow datasets exported from Roboflow."
     )
     parser.add_argument(
-        "--source",
-        default=str("dataset_flat_structure 2"),
-        help="Percorso della directory Roboflow da cui leggere i dati (default: ./roboflow_data).",
-    )
-    parser.add_argument(
-        "--dest",
+        "--base-dir",
         default=str(PROJECT_ROOT / "datasets"),
-        help="Percorso della directory di destinazione (default: ./datasets).",
+        help="Root directory containing the original train/val/test folders.",
     )
     parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Sovrascrive eventuali file esistenti nella destinazione.",
+        "--all-dir",
+        default=None,
+        help="Directory that will aggregate all images before deduplication (default: <base>/all).",
     )
     parser.add_argument(
-        "--test-ratio",
+        "--train-dir",
+        default=None,
+        help="Destination directory for the cleaned train split (default: <base>/train_clean).",
+    )
+    parser.add_argument(
+        "--val-dir",
+        default=None,
+        help="Destination directory for the cleaned val split (default: <base>/val_clean).",
+    )
+    parser.add_argument(
+        "--test-dir",
+        default= None,
+        help="Destination directory for the cleaned test split (default: <base>/test_clean).",
+    )
+    parser.add_argument(
+        "--source-splits",
+        nargs="+",
+        default=("train", "val", "test"),
+        help="Input split folders to scan inside base_dir (default: train val test).",
+    )
+    parser.add_argument(
+        "--train-ratio",
         type=float,
-        default=0.20,
-        help="Quota per il test split quando generato (default: 0.20).",
+        default=0.8,
+        help="Portion of samples per class for the train split when recreating splits.",
     )
     parser.add_argument(
         "--val-ratio",
         type=float,
-        default=0.20,
-        help="Quota per il validation split ricavato dal rimanente (default: 0.20).",
+        default=0.1,
+        help="Portion of samples per class for the validation split.",
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.1,
+        help="Portion of samples per class for the test split.",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=1337,
-        help="Seme per la randomizzazione deterministica.",
+        default=42,
+        help="Seed for deterministic splitting.",
+    )
+    parser.add_argument(
+        "--image-extensions",
+        nargs="+",
+        default=DEFAULT_IMAGE_EXTENSIONS,
+        help="Image file extensions to consider. Defaults to common formats.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-
-    dataset_formatting(
-        init_root=args.source,
-        final_root=args.dest,
-        overwrite=args.overwrite,
-        test_ratio=float(args.test_ratio),
-        val_ratio=float(args.val_ratio),
-        seed=int(args.seed),
+    dataset_cleaner = DatasetCleaner(
+        base_dir=args.base_dir,
+        all_dir=args.all_dir or "all",
+        train_dir=args.train_dir or "train_clean",
+        val_dir=args.val_dir or "val_clean",
+        test_dir=args.test_dir or "test_clean",
+        source_splits=tuple(args.source_splits),
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        threshold=0.9,  # usa la soglia predefinita o passa via CLI se la aggiungi
     )
-
-    print(f"Dataset formattato in '{args.dest}'.")
+    dataset_cleaner.create_splits()
+    dataset_cleaner.verify_no_leakage()
 
 
 if __name__ == "__main__":

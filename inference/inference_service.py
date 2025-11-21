@@ -11,6 +11,7 @@ from flask import Flask, jsonify, request
 from PIL import Image
 
 from ecogrow.data.plant_data import make_segment_fn
+from ecogrow.models.checkpoint_cache import ensure_mobileclip_checkpoint
 from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, DiseaseClipDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
@@ -20,9 +21,24 @@ from ecogrow.preprocessing.image_segmentator import (
 # Note: training engine is not required at runtime for inference
 
 DEFAULT_UNKNOWN_THRESHOLD = float(os.getenv("ECOGROW_UNKNOWN_THRESHOLD", "0.5"))
-MODEL_NAME = os.getenv("ECOGROW_CLIP_MODEL_NAME", "ViT-B-32")
-PRETRAINED_TAG = os.getenv("ECOGROW_CLIP_PRETRAINED", "laion2b_s34b_b79k")
-EMBEDDINGS_DIR = Path(os.getenv("ECOGROW_EMBEDDINGS_DIR", "artifacts")).expanduser()
+
+
+def _resolve_model_name() -> str:
+    return os.getenv("ECOGROW_CLIP_MODEL_NAME", "MobileCLIP-S2")
+
+
+def _resolve_pretrained_tag(model_name: str) -> str:
+    env_override = os.getenv("ECOGROW_CLIP_PRETRAINED")
+    if env_override:
+        return env_override
+    if model_name.startswith("MobileCLIP"):
+        return ensure_mobileclip_checkpoint(model_name=model_name)
+    return "laion2b_s34b_b79k"
+
+
+MODEL_NAME = _resolve_model_name()
+PRETRAINED_TAG = _resolve_pretrained_tag(MODEL_NAME)
+EMBEDDINGS_DIR = Path(os.getenv("ECOGROW_EMBEDDINGS_DIR", "artifacts/embeddings")).expanduser()
 SEGMENTATION_ENABLED = os.getenv("ECOGROW_SEGMENTATION", "1").lower() not in {"0", "false", "no"}
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -57,8 +73,12 @@ def _load_detectors(
 
     detectors: Dict[str, DiseaseClipDetector] = {}
     for path in sorted(root.glob("*.pt")):
-        payload = torch.load(path, map_location="cpu")
-        family = payload.get("family") or path.stem
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        detector_name = (
+            payload.get("detector")
+            or payload.get("family")
+            or path.stem
+        )
         classes = payload.get("classes")
         text_features = payload.get("text_features")
         temperature = float(payload.get("temperature", 0.07))
@@ -66,14 +86,14 @@ def _load_detectors(
             raise ValueError(f"Embedding file '{path.name}' missing classes or text_features.")
 
         tensor_features = torch.as_tensor(text_features)
-        detectors[family] = DiseaseClipDetector(
+        detectors[detector_name] = DiseaseClipDetector(
             classes=list(classes),
             temperature=temperature,
             clip_model=clip_model,
             text_encoder=text_encoder,
             device=device,
             text_features=tensor_features,
-            detector_id=family,
+            detector_id=detector_name,
         )
 
     if not detectors:
@@ -129,7 +149,6 @@ class DiseaseInferenceService:
             self.embeddings_dir,
             self.clip_model,
             self.text_encoder,
-            self.preprocess,
             self.device,
         )
         return len(self.detectors)
