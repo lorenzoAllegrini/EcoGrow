@@ -55,7 +55,11 @@ class ConvNextConfig:
 def _parse_args() -> ConvNextConfig:
     parser = argparse.ArgumentParser(description="ConvNeXt fine-tuning experiment for EcoGrow.")
     parser.add_argument("--dataset-path", default="datasets", help="Path to the EcoGrow dataset root.")
-    parser.add_argument("--exp-dir", default="experiments", help="Directory where run artifacts are stored.")
+    parser.add_argument(
+        "--exp-dir",
+        default="artifacts",
+        help="Directory where run artifacts are stored (default: artifacts).",
+    )
     parser.add_argument("--run-id", default=None, help="Identifier for this run; defaults to convnext_<model>.")
     parser.add_argument("--model-name", default="convnext_small", help="Name of the timm ConvNeXt variant.")
     parser.add_argument("--image-size", type=int, default=224, help="Input size for ConvNeXt transforms.")
@@ -155,6 +159,8 @@ def run_convnext_experiment() -> Dict[str, Dict[str, object]]:
         preprocess=transforms_spec,
         train_backbone=config.train_backbone,
         drop_rate=config.drop_rate,
+        detector_id=config.detector_name,
+        model_name=config.model_name,
     )
 
     trainer = ConvNextFineTuneEngine(detector=detector)
@@ -170,6 +176,7 @@ def run_convnext_experiment() -> Dict[str, Dict[str, object]]:
         "batch_size": config.batch_size,
         "lr": config.lr,
         "log_fn": lambda msg: print(f"[{config.detector_name}] {msg}"),
+        "patience_before_stopping": 1,
     }
 
     result = benchmark.run(

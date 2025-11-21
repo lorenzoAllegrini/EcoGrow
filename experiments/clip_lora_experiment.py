@@ -41,6 +41,7 @@ class Config:
     classifier_dropout: float
     use_segmentation: bool
     num_workers: int
+    num_splits: int
 
 
 def _parse_args() -> Config:
@@ -62,8 +63,8 @@ def _parse_args() -> Config:
     )
     parser.add_argument(
         "--exp-dir",
-        default="experiments",
-        help="Directory principale dove salvare i risultati.",
+        default="artifacts",
+        help="Directory principale dove salvare i risultati (default: artifacts).",
     )
     parser.add_argument(
         "--epochs",
@@ -106,6 +107,12 @@ def _parse_args() -> Config:
         default=0,
         help="Numero di worker per il DataLoader (0 = solo main process).",
     )
+    parser.add_argument(
+        "--num-splits",
+        type=int,
+        default=3,
+        help="Numero di split di cross validation (usa 1 per disabilitare la CV).",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
@@ -133,6 +140,7 @@ def _parse_args() -> Config:
         classifier_dropout=max(0.0, float(args.classifier_dropout)),
         use_segmentation=not bool(args.no_segmentation),
         num_workers=max(0, int(args.num_workers)),
+        num_splits=max(1, int(args.num_splits)),
     )
 
 
@@ -209,8 +217,8 @@ def main() -> Dict[str, Dict[str, object]]:
 
     clip_model.to(device)
 
+    detector_label = "global"
     clip_detector = ClipClassifierDetector(
-        name="global",
         classes=DISEASE_MAPPING.values(),
         clip_model=clip_model,
         preprocess=preprocess,
@@ -218,9 +226,14 @@ def main() -> Dict[str, Dict[str, object]]:
         feature_dropout=config.classifier_dropout,
         train_backbone=True,
         text_encoder=text_encoder,
+        detector_id=detector_label,
     )
     trainer = ClipFineTuneEngine(
         clip_detector=clip_detector,
+    )
+
+    split_indices = (
+        list(range(1, config.num_splits + 1)) if config.num_splits > 1 else None
     )
 
     fit_args = {
@@ -229,13 +242,15 @@ def main() -> Dict[str, Dict[str, object]]:
         "lr": config.lr,
         "log_fn": lambda msg: print(f"[GLOBAL] {msg}"),
         "num_workers": config.num_workers,
+        "patience_before_stopping": 1,
     }
 
     result = benchmark.run(
         trainer=trainer,
-        segment_fn=segment_fn,
+        segment_fn=None,
         perc_eval=None,
         fit_predictor_args=fit_args,
+        split_indices=split_indices,
     )
 
     # Collect LoRA adapter weights for reuse (embedded in payload)
@@ -266,7 +281,7 @@ def main() -> Dict[str, Dict[str, object]]:
     detector_payload = {
         "version": 1,
         "detector_type": "clip_classifier",
-        "name": clip_detector.name,
+        "detector_id": detector_label,
         "classes": list(clip_detector.classes),
         "temperature": float(clip_detector.temperature),
         "dropout": float(config.classifier_dropout),
@@ -282,13 +297,13 @@ def main() -> Dict[str, Dict[str, object]]:
             k: v.detach().cpu() for k, v in clip_detector.classifier.state_dict().items()
         },
     }
-    detector_path = detector_dir / f"{clip_detector.name}.pt"
+    detector_path = detector_dir / f"{detector_label}.pt"
     torch.save(detector_payload, detector_path)
     print(f"[DETECTOR] metadata saved to {detector_path}")
     eval_metrics = result.get("eval_metrics")
     test_metrics = result.get("test_metrics")
     summary_row = {
-        "detector": clip_detector.name,
+        "detector": detector_label,
         "train_samples": result["train_samples"],
         "eval_samples": result["eval_samples"],
         "test_samples": result["test_samples"],

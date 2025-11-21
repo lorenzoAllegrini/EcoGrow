@@ -70,8 +70,8 @@ def _parse_args() -> Config:
     )
     parser.add_argument(
         "--exp-dir",
-        default="experiments",
-        help="Directory principale dove salvare i risultati del benchmark.",
+        default="artifacts",
+        help="Directory principale dove salvare i risultati del benchmark (default: artifacts).",
     )
     parser.add_argument(
         "--epochs",
@@ -217,6 +217,7 @@ def main() -> Dict[str, Dict[str, object]]:
             "batch_size": config.batch_size,
             "lr": config.lr,
             "log_fn": lambda msg, fam=family_name: print(f"[{fam}] {msg}"),
+            "patience_before_stopping": 1,
         }
 
         result = benchmark.run(
