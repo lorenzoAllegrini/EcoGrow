@@ -1,5 +1,5 @@
 # prompt_learning_min.py
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import open_clip
 import torch
@@ -22,7 +22,8 @@ class ClipPromptLearner(nn.Module):
         text_encoder,
         *,
         ctx_vectors: torch.Tensor,
-        model_name: str = "ViT-B-32",
+        tokenizer_model_name: str = "ViT-B-32",
+        class_prompt_texts_suffix: Dict[str, Any] = None 
     ):
         super().__init__()
         self.classnames = [c.replace("_", " ") for c in classnames]
@@ -31,7 +32,7 @@ class ClipPromptLearner(nn.Module):
         dtype = text_encoder.dtype
         ctx_dim = text_encoder.text_projection.shape[1]
         self.text_encoder = text_encoder
-        self._tokenizer = open_clip.get_tokenizer(model_name)
+        self._tokenizer = open_clip.get_tokenizer(tokenizer_model_name)
 
         if not isinstance(ctx_vectors, torch.Tensor) or ctx_vectors.dim() != 2:
             raise ValueError("ctx_vectors must be a 2D torch.Tensor [n_ctx, D]")
@@ -44,16 +45,53 @@ class ClipPromptLearner(nn.Module):
         self.ctx.requires_grad_(True)
 
         placeholder = " ".join(["X"] * self.n_ctx)
-        prompts_txt = [f"{placeholder} {name}." for name in self.classnames]
-        tokenized = torch.cat([self._tokenizer([p]) for p in prompts_txt], dim=0).long()
-        self.register_buffer("tokenized_prompts", tokenized, persistent=False)
 
-        with torch.no_grad():
-            emb_full = self.text_encoder.token_embedding(self.tokenized_prompts.to(embedding_device)).type(dtype)
+        prompts_txt = []
+        prompt_class_indices = []  # per sapere a che classe appartiene ogni prompt
 
-        # Keep SOS as prefix and everything after the n_ctx placeholders as suffix
-        self.register_buffer("token_prefix", emb_full[:, :1, :])            # [C,1,D]
-        self.register_buffer("token_suffix", emb_full[:, 1 + self.n_ctx :, :])  # [C,*,D]
+        for class_idx, cname in enumerate(self.classnames):
+            # chiave originale nel dict (es. "snake_plant")
+            raw_key = cname.replace(" ", "_")
+
+            # lista di descrizioni per quella classe
+            if class_prompt_texts_suffix is not None and raw_key in class_prompt_texts_suffix:
+                suffix_list = class_prompt_texts_suffix[raw_key]
+            else:
+                # fallback: se non c'è nulla nel dict, uso solo il nome classe
+                suffix_list = [cname]
+
+            # assicuriamoci che sia una lista
+            if isinstance(suffix_list, str):
+                suffix_list = [suffix_list]
+
+            for desc in suffix_list:
+                desc = desc.strip()
+                if not desc.endswith("."):
+                    desc += "."
+                full_prompt = f"{placeholder} {desc}"
+                prompts_txt.append(full_prompt)
+                prompt_class_indices.append(class_idx)
+
+            # tokenizzazione di TUTTI i prompt (uno per riga)
+            tokenized = torch.cat([self._tokenizer([p]) for p in prompts_txt], dim=0).long()
+            self.register_buffer("tokenized_prompts", tokenized, persistent=False)
+
+            # mappa prompt → classe (serve dopo, in forward)
+            self.register_buffer(
+                "prompt_class_indices",
+                torch.tensor(prompt_class_indices, dtype=torch.long),
+                persistent=False,
+            )
+
+            with torch.no_grad():
+                emb_full = self.text_encoder.token_embedding(
+                    self.tokenized_prompts.to(embedding_device)
+                ).type(dtype)
+
+            # Prefisso = solo SOS
+            self.register_buffer("token_prefix", emb_full[:, :1, :])               # [N_prompt, 1, D]
+            # Suffisso = tutto dopo i placeholder
+            self.register_buffer("token_suffix", emb_full[:, 1 + self.n_ctx :, :]) # [N_prompt, *, D]
 
     def forward(self, img_features=None):  
         ctx = self.ctx

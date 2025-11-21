@@ -3,12 +3,14 @@ import csv
 import json
 import os
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 import torch
+import torch.nn.functional as F
 from peft import LoraConfig, LoraModel
-
+from experiments.utils import compute_init_ctx, save_lora_adapter
 os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -16,12 +18,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyAdaptedClipDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, ClipClassifierDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
     segment_plant_rgba,
 )
+from ecogrow.training.prompt_learners import ClipPromptLearner
 from ecogrow.training.trainers import ClipFineTuneEngine
 from ecogrow.data.plant_data import PlantData, make_segment_fn, DISEASE_MAPPING
 from ecogrow.models.checkpoint_cache import ensure_mobileclip_checkpoint
@@ -70,7 +73,7 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=8,
+        default=64,
         help="Batch size utilizzata durante il fine-tuning.",
     )
     parser.add_argument(
@@ -119,17 +122,57 @@ def _parse_args() -> Config:
     )
 
 
-def _clone_state_dict(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
-    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+def _canonicalize_label(label: str) -> str:
+    normalized = label.replace("-", "_").replace(" ", "_").lower()
+    for alias, canonical in DISEASE_MAPPING.items():
+        if alias in normalized:
+            return canonical
+    return normalized
+
+
+def _collect_class_prompts(prompt_config: Dict[str, object]) -> Dict[str, List[str]]:
+    """Extract prompt texts per disease class from the JSON config."""
+
+    per_class: Dict[str, List[str]] = defaultdict(list)
+
+    def _append(label: str, value) -> None:
+        if not label:
+            return
+        canonical = _canonicalize_label(label)
+
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                per_class[canonical].append(text)
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                _append(label, item)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                _append(label, nested)
+
+    for family_payload in prompt_config.values():
+        if isinstance(family_payload, dict):
+            for disease_label, entries in family_payload.items():
+                _append(disease_label, entries)
+
+    return per_class
+
+
+def _default_prompt(label: str) -> str:
+    pretty = label.replace("_", " ")
+    return f"a close-up photo of a plant showing {pretty}"
+
+
 
 
 def main() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_name = "MobileCLIP-S2"
+    model_name = "MobileCLIP-S1"
     pretrained_tag = ensure_mobileclip_checkpoint(model_name=model_name)
-    clip_model, preprocess, _, text_encoder = init_open_clip(
+    clip_model, preprocess, tokenizer, text_encoder = init_open_clip(
         model_name=model_name,
         pretrained_tag=pretrained_tag,
         device=device,
@@ -138,11 +181,6 @@ def main() -> Dict[str, Dict[str, object]]:
     candidate_targets = [
         "token_mixer.qkv",
         "token_mixer.proj",
-        "mlp.fc1",
-        "mlp.fc2",
-        "head.fc",
-        "se.fc1",
-        "se.fc2",
     ]
 
     submodule_names = [name for name, _ in clip_model.visual.named_modules()]
@@ -158,7 +196,7 @@ def main() -> Dict[str, Dict[str, object]]:
         p.requires_grad_(False)
 
     lora_config = LoraConfig(
-        r=8,
+        r=16,
         lora_alpha=16,
         lora_dropout=0.05,
         target_modules=filtered_targets if filtered_targets else candidate_targets,
@@ -192,15 +230,43 @@ def main() -> Dict[str, Dict[str, object]]:
     with open(config.prompts_config, "r", encoding="utf-8") as f:
         prompt_config = json.load(f)
 
-    families = tuple(dict.fromkeys(prompt_config.keys()))
-    if not families:
-        raise ValueError("Prompts config must define at least one family.")
+    if not prompt_config:
+        raise ValueError("Prompts config must define at least one entry.")
+
+    # Determine consistent class ordering from the training split
+    preview_dataset = PlantData(
+        dataset_root=config.dataset_path,
+        split="train",
+        segment_fn=segment_fn,
+        transform=preprocess,
+    )
+    classnames = preview_dataset.classes
+    print(classnames)
+
+    prompt_texts_map = _collect_class_prompts(prompt_config)
+    class_prompt_texts: List[str] = []
+    class_prompt_texts_suffix: List[str] = []
+    for cls in classnames:
+        prompts_for_class = prompt_texts_map.get(cls)
+        if prompts_for_class:
+            print(f"class: {cls}, prompt_for_class: {prompts_for_class}\n")
+            prompts = prompts_for_class[1::2]
+            prompts_suffix = prompts_for_class[0::2]
+            if len(prompts) == 1:
+                class_prompt_texts.append(prompts[0])
+            else: 
+                class_prompt_texts.extend(prompts)
+            class_prompt_texts_suffix.append((cls,prompts_suffix))
+        else:
+            print("molto peso")
+            class_prompt_texts.append(_default_prompt(cls))
+            class_prompt_texts_suffix.append((cls,_default_prompt(cls)))
 
     clip_model.to(device)
 
-    family_detector = FamilyAdaptedClipDetector(
+    clip_detector = ClipClassifierDetector(
         name="global",
-        classes=DISEASE_MAPPING.values(),
+        classes=classnames,
         clip_model=clip_model,
         preprocess=preprocess,
         device=device,
@@ -208,8 +274,24 @@ def main() -> Dict[str, Dict[str, object]]:
         train_backbone=True,
         text_encoder=text_encoder,
     )
+    ctx_init = compute_init_ctx(
+        n_ctx=16,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        class_prompts=class_prompt_texts,
+    )
+
+    prompt_learner = ClipPromptLearner(
+        classnames=classnames,
+        text_encoder=text_encoder,
+        ctx_vectors=ctx_init,
+        model_name=model_name,
+        #class_prompt_texts_suffix
+    ).to(device)
+
     trainer = ClipFineTuneEngine(
-        family_detector=family_detector,
+        clip_detector=clip_detector,
+        prompt_learner=prompt_learner
     )
 
     fit_args = {
@@ -221,44 +303,60 @@ def main() -> Dict[str, Dict[str, object]]:
 
     result = benchmark.run(
         trainer=trainer,
-        segment_fn=segment_fn,
-        families=families,
+        segment_fn=None,
         perc_eval=None,
         fit_predictor_args=fit_args,
     )
 
+    with torch.no_grad():
+        prompts_embeds, tokenized_prompts = prompt_learner()
+        text_features = text_encoder(prompts_embeds, tokenized_prompts)
+        text_features = F.normalize(text_features, dim=-1).cpu()
+
     # Save LoRA adapter weights for reuse
+    lora_dir = Path(benchmark.run_dir) / "lora"
+    adapter_rel_path = None
     try:
-        lora_dir = Path(benchmark.run_dir) / "lora"
-        lora_dir.mkdir(parents=True, exist_ok=True)
-        clip_model.visual.save_pretrained(lora_dir)
-        print(f"[LoRA] adapter saved to {lora_dir}")
+        adapter_path = save_lora_adapter(clip_model.visual, lora_config, lora_dir)
+        adapter_rel_path = os.path.relpath(adapter_path, benchmark.run_dir)
+        print(f"[LoRA] adapter saved to {adapter_path}")
     except Exception as e:
         print(f"[LoRA][WARN] failed to save adapter: {e}")
-    """
-    test_dataset = plant_data.get_split("test")
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-    )
-    result["test_samples"] = len(test_dataset)
+        adapter_rel_path = None
 
-    test_epoch = trainer.eval(test_loader)
-    test_metrics = {
-        "loss": test_epoch.loss,
-        "f1": test_epoch.f1,
+    # Persist detector metadata for future inference reconstruction
+    detector_dir = Path(benchmark.run_dir) / "detectors"
+    detector_dir.mkdir(parents=True, exist_ok=True)
+    detector_payload = {
+        "version": 1,
+        "detector_type": "clip_classifier",
+        "name": clip_detector.name,
+        "classes": list(clip_detector.classes),
+        "temperature": float(clip_detector.temperature),
+        "dropout": float(config.classifier_dropout),
+        "clip_model_name": model_name,
+        "pretrained_tag": pretrained_tag,
+        "lora_adapter_path": adapter_rel_path,
+        "text_features": text_features,
+        "model_state_dict": {
+            k: v.detach().cpu() for k, v in clip_detector.classifier.state_dict().items()
+        },
     }
-    result["test_metrics"] = test_metrics"""
+    detector_path = detector_dir / f"{clip_detector.name}.pt"
+    torch.save(detector_payload, detector_path)
+    print(f"[DETECTOR] metadata saved to {detector_path}")
 
     eval_metrics = result.get("eval_metrics")
+    test_metrics = result.get("test_metrics")
     summary_row = {
-        "family_id": "global",
+        "detector": clip_detector.name,
         "train_samples": result["train_samples"],
         "eval_samples": result["eval_samples"],
         "test_samples": result["test_samples"],
         "eval_loss": eval_metrics["loss"] if eval_metrics else None,
         "eval_f1": eval_metrics["f1"] if eval_metrics else None,
+        "test_loss": test_metrics["loss"] if test_metrics else None,
+        "test_f1": test_metrics["f1"] if test_metrics else None,
         "temperature": result.get("temperature"),
     }
 

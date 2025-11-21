@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 import torch
+import torch.nn.functional as F
 from peft import LoraConfig, LoraModel
+from experiments.utils import save_lora_adapter
 
 os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
 
@@ -16,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, FamilyAdaptedClipDetector
+from ecogrow.models.open_clip_wrapper import init_open_clip, ClipClassifierDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -37,6 +39,8 @@ class Config:
     perc_eval: float
     lr: float
     classifier_dropout: float
+    use_segmentation: bool
+    num_workers: int
 
 
 def _parse_args() -> Config:
@@ -70,7 +74,7 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=8,
+        default=32,
         help="Batch size utilizzata durante il fine-tuning.",
     )
     parser.add_argument(
@@ -90,6 +94,17 @@ def _parse_args() -> Config:
         type=float,
         default=0.1,
         help="Dropout applicato prima del classificatore lineare.",
+    )
+    parser.add_argument(
+        "--no-segmentation",
+        action="store_true",
+        help="Disabilita la segmentazione della pianta per massimizzare la velocità.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Numero di worker per il DataLoader (0 = solo main process).",
     )
     args = parser.parse_args()
 
@@ -116,20 +131,19 @@ def _parse_args() -> Config:
         perc_eval=max(0.0, float(args.perc_eval)),
         lr=args.lr,
         classifier_dropout=max(0.0, float(args.classifier_dropout)),
+        use_segmentation=not bool(args.no_segmentation),
+        num_workers=max(0, int(args.num_workers)),
     )
 
-
-def _clone_state_dict(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
-    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
 def main() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_name = "MobileCLIP-S2"
+    model_name = "MobileCLIP-S1"
     pretrained_tag = ensure_mobileclip_checkpoint(model_name=model_name)
-    clip_model, preprocess, _, text_encoder = init_open_clip(
+    clip_model, preprocess, tokenizer, text_encoder = init_open_clip(
         model_name=model_name,
         pretrained_tag=pretrained_tag,
         device=device,
@@ -138,17 +152,12 @@ def main() -> Dict[str, Dict[str, object]]:
     candidate_targets = [
         "token_mixer.qkv",
         "token_mixer.proj",
-        "mlp.fc1",
-        "mlp.fc2",
-        "head.fc",
-        "se.fc1",
-        "se.fc2",
     ]
 
     submodule_names = [name for name, _ in clip_model.visual.named_modules()]
     filtered_targets = [t for t in candidate_targets if any(t in n for n in submodule_names)]
     if not filtered_targets:
-        fallback = ["attn.qkv", "attn.proj", "mlp.fc1", "mlp.fc2", "qkv", "proj"]
+        fallback = ["attn.qkv", "attn.proj"]
         filtered_targets = [t for t in fallback if any(t in n for n in submodule_names)]
 
     print(f"[LoRA] target_modules candidates matched: {filtered_targets if filtered_targets else 'NONE'}")
@@ -158,8 +167,8 @@ def main() -> Dict[str, Dict[str, object]]:
         p.requires_grad_(False)
 
     lora_config = LoraConfig(
-        r=8,
-        lora_alpha=16,
+        r=4,
+        lora_alpha=8,
         lora_dropout=0.05,
         target_modules=filtered_targets if filtered_targets else candidate_targets,
         bias="none",
@@ -183,22 +192,24 @@ def main() -> Dict[str, Dict[str, object]]:
         data_root=str(config.dataset_path),
     )
 
-    segment_fn = make_segment_fn(
-        segment_plant_rgba,
-        crop_to_alpha_bbox,
-        black_bg_composite,
-        pad=12,
-    )
+    if config.use_segmentation:
+        segment_fn = make_segment_fn(
+            segment_plant_rgba,
+            crop_to_alpha_bbox,
+            black_bg_composite,
+            pad=12,
+        )
+    else:
+        segment_fn = None
     with open(config.prompts_config, "r", encoding="utf-8") as f:
         prompt_config = json.load(f)
 
-    families = tuple(dict.fromkeys(prompt_config.keys()))
-    if not families:
-        raise ValueError("Prompts config must define at least one family.")
+    if not prompt_config:
+        raise ValueError("Prompts config must define at least one entry.")
 
     clip_model.to(device)
 
-    family_detector = FamilyAdaptedClipDetector(
+    clip_detector = ClipClassifierDetector(
         name="global",
         classes=DISEASE_MAPPING.values(),
         clip_model=clip_model,
@@ -209,7 +220,7 @@ def main() -> Dict[str, Dict[str, object]]:
         text_encoder=text_encoder,
     )
     trainer = ClipFineTuneEngine(
-        family_detector=family_detector,
+        clip_detector=clip_detector,
     )
 
     fit_args = {
@@ -217,48 +228,74 @@ def main() -> Dict[str, Dict[str, object]]:
         "batch_size": config.batch_size,
         "lr": config.lr,
         "log_fn": lambda msg: print(f"[GLOBAL] {msg}"),
+        "num_workers": config.num_workers,
     }
 
     result = benchmark.run(
         trainer=trainer,
         segment_fn=segment_fn,
-        families=families,
         perc_eval=None,
         fit_predictor_args=fit_args,
     )
 
-    # Save LoRA adapter weights for reuse
-    try:
-        lora_dir = Path(benchmark.run_dir) / "lora"
-        lora_dir.mkdir(parents=True, exist_ok=True)
-        clip_model.visual.save_pretrained(lora_dir)
-        print(f"[LoRA] adapter saved to {lora_dir}")
-    except Exception as e:
-        print(f"[LoRA][WARN] failed to save adapter: {e}")
-    """
-    test_dataset = plant_data.get_split("test")
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-    )
-    result["test_samples"] = len(test_dataset)
-
-    test_epoch = trainer.eval(test_loader)
-    test_metrics = {
-        "loss": test_epoch.loss,
-        "f1": test_epoch.f1,
+    # Collect LoRA adapter weights for reuse (embedded in payload)
+    trainable_param_names = {
+        name for name, p in clip_model.visual.named_parameters() if p.requires_grad
     }
-    result["test_metrics"] = test_metrics"""
+    full_state = clip_model.visual.state_dict()
+    lora_state = {
+        k: v.detach().cpu() for k, v in full_state.items() if k in trainable_param_names
+    }
+    try:
+        lora_config_dict = lora_config.to_dict()  # type: ignore[assignment]
+    except AttributeError:
+        lora_config_dict = dict(lora_config.__dict__)
 
+    with torch.no_grad():
+        prompt_texts = [
+            f"a close-up photo of a plant showing {cls.replace('_', ' ')}"
+            for cls in clip_detector.classes
+        ]
+        tokens = tokenizer(prompt_texts).to(device)
+        text_features = clip_model.encode_text(tokens)
+        text_features = F.normalize(text_features, dim=-1).cpu()
+
+    # Persist detector metadata for future inference reconstruction
+    detector_dir = Path(benchmark.run_dir) / "detectors"
+    detector_dir.mkdir(parents=True, exist_ok=True)
+    detector_payload = {
+        "version": 1,
+        "detector_type": "clip_classifier",
+        "name": clip_detector.name,
+        "classes": list(clip_detector.classes),
+        "temperature": float(clip_detector.temperature),
+        "dropout": float(config.classifier_dropout),
+        "model_name": model_name,
+        "pretrained_tag": pretrained_tag,
+        "lora_adapter": {
+            "peft_type": "LORA",
+            "config": lora_config_dict,
+            "state_dict": lora_state,
+        },
+        "text_features": text_features,
+        "model_state_dict": {
+            k: v.detach().cpu() for k, v in clip_detector.classifier.state_dict().items()
+        },
+    }
+    detector_path = detector_dir / f"{clip_detector.name}.pt"
+    torch.save(detector_payload, detector_path)
+    print(f"[DETECTOR] metadata saved to {detector_path}")
     eval_metrics = result.get("eval_metrics")
+    test_metrics = result.get("test_metrics")
     summary_row = {
-        "family_id": "global",
+        "detector": clip_detector.name,
         "train_samples": result["train_samples"],
         "eval_samples": result["eval_samples"],
         "test_samples": result["test_samples"],
         "eval_loss": eval_metrics["loss"] if eval_metrics else None,
         "eval_f1": eval_metrics["f1"] if eval_metrics else None,
+        "test_loss": test_metrics["loss"] if test_metrics else None,
+        "test_f1": test_metrics["f1"] if test_metrics else None,
         "temperature": result.get("temperature"),
     }
 

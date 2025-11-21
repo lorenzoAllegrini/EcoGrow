@@ -12,16 +12,16 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data import WeightedRandomSampler
 import math 
 
-SPECIES_MAPPING = {
-    "chrysanthemum": "chrysanthemum",
-    "hibiscus": "hibiscus",
-    "money_plant": "money_plant",
-    "rose": "rose",
-    "turmeric": "turmeric",
-    "snake_plant": "snake_plant",
-    "spider_plant": "spider_plant",
-    "aloe": "aloe",
-    "cactus": "cactus",
+SPECIES_FAMILY_MAPPING = {
+    "chrysanthemum": "Asteraceae",      
+    "hibiscus": "Malvaceae",             
+    "money_plant": "Araceae",          
+    "rose": "Rosaceae",                  
+    "turmeric": "Zingiberaceae",        
+    "snake_plant": "Asparagaceae",       
+    "spider_plant": "Asparagaceae",      
+    "aloe": "Asphodelaceae",              
+    "cactus": "Cactaceae",               
 }
 
 DISEASE_MAPPING = {
@@ -36,9 +36,8 @@ DISEASE_MAPPING = {
 
     "blotch": "necrotic_fungal_lesion",
 
-    "leaf_spot": "generic_fungal_leaf_spot",
-    "fungal_leaf_spot": "generic_fungal_leaf_spot",
-
+    "leaf_spot": "fungal_leaf_spot",
+    "fungal_leaf_spot": "fungal_leaf_spot",
 
     "blight": "blight",
 
@@ -148,6 +147,12 @@ class PlantData(Dataset):
         else:
             resolved_split = split_name or ("train" if train else "test")
 
+        # Preferisci sempre gli split \"*_clean\" se presenti nella root del dataset.
+        if resolved_split in {"train", "val", "test"}:
+            clean_candidate = f"{resolved_split}_clean"
+            if (self.root / clean_candidate).is_dir():
+                resolved_split = clean_candidate
+
         self.split = resolved_split
         self.families: List[str] = []
         self.original_classes_count: Dict[str, int] = {}
@@ -183,7 +188,7 @@ class PlantData(Dataset):
         samples: List[Sample] = []
 
         for species_original_name, species_dir in species_dirs:
-            species_name = self.resolve_name(species_original_name, SPECIES_MAPPING)
+            species_name = self.resolve_name(species_original_name, SPECIES_FAMILY_MAPPING)
             for disease_dir in sorted(p for p in species_dir.iterdir() if p.is_dir()):
                 disease_name = self.resolve_name(disease_dir.name, DISEASE_MAPPING)
                 idx = class_to_idx.setdefault(disease_name, len(class_to_idx))
