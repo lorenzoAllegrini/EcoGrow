@@ -285,6 +285,26 @@ class PlantData(Dataset):
             drop_last=drop_last
         )
 
+    def extend_with(self, other: Optional["PlantData"]) -> None:
+        """Append samples and counts from another split (e.g., validation)."""
+        if other is None:
+            return
+        self.samples = list(self.samples)
+        for sample in getattr(other, "samples", []):
+            self.samples.append(sample)
+            self.original_classes_count[sample.original_class_name] = (
+                self.original_classes_count.get(sample.original_class_name, 0) + 1
+            )
+            self.class_counts[sample.label] = (
+                self.class_counts.get(sample.label, 0) + 1
+            )
+        counts = torch.tensor(
+            [self.class_counts[idx] for idx in sorted(self.class_counts.keys())],
+            dtype=torch.float,
+        )
+        freq = counts / counts.sum()
+        self.log_priors = torch.log(freq + 1e-8)
+
 
     def _resolve_family_dirs(self) -> List[Tuple[str, Path]]:
         split_dir = self.root / self.split

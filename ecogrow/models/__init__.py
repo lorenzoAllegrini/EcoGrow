@@ -1,4 +1,4 @@
-from .open_clip_wrapper import (
+from .model_wrappers import (
     init_open_clip,
     freeze_open_clip_backbone,
     TextEncoderOpenCLIP,

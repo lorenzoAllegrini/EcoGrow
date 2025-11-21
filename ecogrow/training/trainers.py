@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ecogrow.models.open_clip_wrapper import DiseaseClipDetector, ClipClassifierDetector
+from ecogrow.models.model_wrappers import DiseaseClipDetector, ClipClassifierDetector
 from .prompt_learners import ClipPromptLearner
 
 from peft import LoraConfig, get_peft_model
@@ -323,7 +323,9 @@ class ClipFineTuneEngine:
         self.detector = clip_detector
         self.device = clip_detector.device
         self.preprocess = clip_detector.preprocess
-        self.detector_name = clip_detector.name
+        self.detector_name = getattr(
+            clip_detector, "detector_id", clip_detector.__class__.__name__
+        )
         self.temperature = clip_detector.temperature
         self.prompt_learner = prompt_learner
         self._log_prior_bias: Optional[torch.Tensor] = None
@@ -572,7 +574,9 @@ class ConvNextFineTuneEngine:
         self.detector = detector
         self.device = detector.device
         self.preprocess = detector.preprocess
-        self.detector_name = detector.name
+        self.detector_name = getattr(
+            detector, "detector_id", detector.__class__.__name__
+        )
 
     def parameters(self):
         return self.detector.parameters()
