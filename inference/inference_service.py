@@ -10,10 +10,10 @@ import torch
 from flask import Flask, jsonify, request
 from PIL import Image
 
-from ecogrow.data.plant_data import make_segment_fn
-from ecogrow.models.checkpoint_cache import ensure_mobileclip_checkpoint
-from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, DiseaseClipDetector
-from ecogrow.preprocessing.image_segmentator import (
+from disease_detection.data.plant_data import make_segment_fn
+from disease_detection.models.checkpoint_cache import ensure_mobileclip_checkpoint
+from disease_detection.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, DiseaseClipDetector
+from disease_detection.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
     segment_plant_rgba,
@@ -45,7 +45,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 app = Flask(__name__)
 
 
-## Disease detectors are provided by ecogrow.models.open_clip_wrapper
+## Disease detectors are provided by disease_detection.models.open_clip_wrapper
 
 
 def _build_segmenter():

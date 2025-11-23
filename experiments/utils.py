@@ -6,8 +6,8 @@ from typing import Iterable, List, Sequence, Dict, Callable
 from pathlib import Path
 import torch
 import torch.nn.functional as F
-from ecogrow.models.model_wrappers import TextEncoderOpenCLIP
-from ecogrow.training.prompt_learners import ClipPromptLearner
+from disease_detection.models.model_wrappers import TextEncoderOpenCLIP
+from disease_detection.training.prompt_learners import ClipPromptLearner
 
 @torch.no_grad()
 def compute_init_ctx(

@@ -11,8 +11,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from ecogrow.data.plant_data import PlantData
-from ecogrow.training.trainers import EpochMetrics
+from disease_detection.data.plant_data import PlantData
+from disease_detection.training.trainers import EpochMetrics
 
 
 @dataclass
