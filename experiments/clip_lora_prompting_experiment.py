@@ -17,17 +17,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.model_wrappers import init_open_clip, ClipClassifierDetector
-from ecogrow.preprocessing.image_segmentator import (
+from disease_detection.benchmark.ecogrow_benchmark import EcogrowBenchmark
+from disease_detection.models.model_wrappers import init_open_clip, ClipClassifierDetector
+from disease_detection.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
     segment_plant_rgba,
 )
-from ecogrow.training.prompt_learners import ClipPromptLearner
-from ecogrow.training.trainers import ClipFineTuneEngine
-from ecogrow.data.plant_data import PlantData, make_segment_fn, DISEASE_MAPPING
-from ecogrow.models.checkpoint_cache import ensure_mobileclip_checkpoint
+from disease_detection.training.prompt_learners import ClipPromptLearner
+from disease_detection.training.trainers import ClipFineTuneEngine
+from disease_detection.data.plant_data import PlantData, make_segment_fn, DISEASE_MAPPING
+from disease_detection.models.checkpoint_cache import ensure_mobileclip_checkpoint
 
 @dataclass(frozen=True)
 class Config:
@@ -68,7 +68,7 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--epochs",
         type=int,
-        default=10,
+        default=7,
         help="Numero di epoche di fine-tuning per ciascuna famiglia.",
     )
     parser.add_argument(
@@ -98,7 +98,7 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--num-splits",
         type=int,
-        default=3,
+        default=1,
         help="Numero di split di cross validation (usa 1 per disabilitare la CV).",
     )
     args = parser.parse_args()

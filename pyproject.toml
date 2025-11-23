@@ -1,9 +1,9 @@
 [tool.poetry]
-name = "ecogrow"
+name = "disease-detection"
 version = "0.1.0"
-description = "EcoGrow ML components and benchmarks."
+description = "Disease detection ML components and benchmarks."
 authors = ["EcoGrow Team <team@ecogrow.local>"]
-packages = [{ include = "ecogrow" }]
+packages = [{ include = "disease_detection" }]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.12"

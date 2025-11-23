@@ -18,16 +18,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, FamilyClipDetector
-from ecogrow.preprocessing.image_segmentator import (
+from disease_detection.benchmark.ecogrow_benchmark import EcogrowBenchmark
+from disease_detection.models.open_clip_wrapper import init_open_clip, freeze_open_clip_backbone, FamilyClipDetector
+from disease_detection.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
     segment_plant_rgba,
 )
-from ecogrow.training.prompt_learners import ClipPromptLearner
-from ecogrow.training.trainers import ClipPromptEngine
-from ecogrow.data.plant_data import PlantData, make_segment_fn
+from disease_detection.training.prompt_learners import ClipPromptLearner
+from disease_detection.training.trainers import ClipPromptEngine
+from disease_detection.data.plant_data import PlantData, make_segment_fn
 from experiments.utils import compute_init_ctx, export_family_embeddings
 
 

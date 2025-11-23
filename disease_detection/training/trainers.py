@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ecogrow.models.model_wrappers import DiseaseClipDetector, ClipClassifierDetector
+from disease_detection.models.model_wrappers import DiseaseClipDetector, ClipClassifierDetector
 from .prompt_learners import ClipPromptLearner
 
 from peft import LoraConfig, get_peft_model

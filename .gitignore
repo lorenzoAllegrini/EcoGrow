@@ -15,7 +15,7 @@
 *.pyc
 .DS_Store
 /.venv/lib
-dataset*
+datasets*
 __pycache__/...
 *.pyc
 .DS_Store
