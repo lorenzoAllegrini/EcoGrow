@@ -6,7 +6,7 @@ from typing import Iterable, List, Sequence, Dict, Callable
 from pathlib import Path
 import torch
 import torch.nn.functional as F
-from ecogrow.models.open_clip_wrapper import TextEncoderOpenCLIP
+from ecogrow.models.model_wrappers import TextEncoderOpenCLIP
 from ecogrow.training.prompt_learners import ClipPromptLearner
 
 @torch.no_grad()
@@ -116,43 +116,6 @@ def export_detector_embeddings(
     torch.save(payload, out_path)
     return payload
 
-
-def save_lora_adapter(
-    module: torch.nn.Module,
-    config,
-    save_dir: Path,
-    filename: str = "adapter.pt",
-) -> Path:
-    """
-    Salva solo i pesi addestrabili (LoRA) di un modulo PEFT.
-
-    Viene creato un payload con:
-      - state_dict: solo i parametri con requires_grad=True
-      - config: dizionario della LoraConfig associata
-    """
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    trainable_param_names = {
-        name for name, p in module.named_parameters() if p.requires_grad
-    }
-    full_state = module.state_dict()
-    adapter_state = {
-        k: v.detach().cpu() for k, v in full_state.items() if k in trainable_param_names
-    }
-
-    if hasattr(config, "to_dict"):
-        cfg = config.to_dict()  # type: ignore[assignment]
-    else:
-        cfg = dict(config.__dict__)
-
-    payload = {
-        "peft_type": "LORA",
-        "config": cfg,
-        "state_dict": adapter_state,
-    }
-    path = save_dir / filename
-    torch.save(payload, path)
-    return path
 def list_leaf_modules(model):
     leaves = []
     for name, module in model.named_modules():
@@ -160,6 +123,38 @@ def list_leaf_modules(model):
             leaves.append((name, module.__class__.__name__))
     
     return leaves
+
+
+def save_lora_adapter(
+    model: torch.nn.Module,
+    lora_config,
+    out_dir: Path,
+    adapter_name: str = "default",
+) -> Path:
+    """Persist only LoRA adapter weights and config."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        k: v.detach().cpu()
+        for k, v in model.state_dict().items()
+        if "lora_" in k
+    }
+
+    try:
+        config_dict = lora_config.to_dict()  # type: ignore[attr-defined]
+    except AttributeError:
+        config_dict = dict(lora_config.__dict__)
+
+    payload = {
+        "peft_type": "LORA",
+        "adapter_name": adapter_name,
+        "config": config_dict,
+        "state_dict": state,
+    }
+
+    path = out_dir / f"{adapter_name}.pt"
+    torch.save(payload, path)
+    return path
+
 
 
 __all__ = [

@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ecogrow.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from ecogrow.models.open_clip_wrapper import init_open_clip, ClipClassifierDetector
+from ecogrow.models.model_wrappers import init_open_clip, ClipClassifierDetector
 from ecogrow.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -40,6 +40,7 @@ class Config:
     perc_eval: float
     lr: float
     classifier_dropout: float
+    num_splits: int
 
 
 def _parse_args() -> Config:
@@ -61,8 +62,8 @@ def _parse_args() -> Config:
     )
     parser.add_argument(
         "--exp-dir",
-        default="experiments",
-        help="Directory principale dove salvare i risultati.",
+        default="artifacts",
+        help="Directory principale dove salvare i risultati (default: artifacts).",
     )
     parser.add_argument(
         "--epochs",
@@ -94,6 +95,12 @@ def _parse_args() -> Config:
         default=0.1,
         help="Dropout applicato prima del classificatore lineare.",
     )
+    parser.add_argument(
+        "--num-splits",
+        type=int,
+        default=3,
+        help="Numero di split di cross validation (usa 1 per disabilitare la CV).",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
@@ -119,6 +126,7 @@ def _parse_args() -> Config:
         perc_eval=max(0.0, float(args.perc_eval)),
         lr=args.lr,
         classifier_dropout=max(0.0, float(args.classifier_dropout)),
+        num_splits=max(1, int(args.num_splits)),
     )
 
 
@@ -241,7 +249,6 @@ def main() -> Dict[str, Dict[str, object]]:
         transform=preprocess,
     )
     classnames = preview_dataset.classes
-    print(classnames)
 
     prompt_texts_map = _collect_class_prompts(prompt_config)
     class_prompt_texts: List[str] = []
@@ -249,7 +256,6 @@ def main() -> Dict[str, Dict[str, object]]:
     for cls in classnames:
         prompts_for_class = prompt_texts_map.get(cls)
         if prompts_for_class:
-            print(f"class: {cls}, prompt_for_class: {prompts_for_class}\n")
             prompts = prompts_for_class[1::2]
             prompts_suffix = prompts_for_class[0::2]
             if len(prompts) == 1:
@@ -258,14 +264,13 @@ def main() -> Dict[str, Dict[str, object]]:
                 class_prompt_texts.extend(prompts)
             class_prompt_texts_suffix.append((cls,prompts_suffix))
         else:
-            print("molto peso")
             class_prompt_texts.append(_default_prompt(cls))
             class_prompt_texts_suffix.append((cls,_default_prompt(cls)))
 
     clip_model.to(device)
 
+    detector_label = "global"
     clip_detector = ClipClassifierDetector(
-        name="global",
         classes=classnames,
         clip_model=clip_model,
         preprocess=preprocess,
@@ -273,6 +278,7 @@ def main() -> Dict[str, Dict[str, object]]:
         feature_dropout=config.classifier_dropout,
         train_backbone=True,
         text_encoder=text_encoder,
+        detector_id=detector_label,
     )
     ctx_init = compute_init_ctx(
         n_ctx=16,
@@ -285,7 +291,7 @@ def main() -> Dict[str, Dict[str, object]]:
         classnames=classnames,
         text_encoder=text_encoder,
         ctx_vectors=ctx_init,
-        model_name=model_name,
+        tokenizer_model_name=model_name,
         #class_prompt_texts_suffix
     ).to(device)
 
@@ -294,11 +300,16 @@ def main() -> Dict[str, Dict[str, object]]:
         prompt_learner=prompt_learner
     )
 
+    split_indices = (
+        list(range(1, config.num_splits + 1)) if config.num_splits > 1 else None
+    )
+
     fit_args = {
         "epochs": config.epochs,
         "batch_size": config.batch_size,
         "lr": config.lr,
         "log_fn": lambda msg: print(f"[GLOBAL] {msg}"),
+        "patience_before_stopping": 1,
     }
 
     result = benchmark.run(
@@ -306,6 +317,7 @@ def main() -> Dict[str, Dict[str, object]]:
         segment_fn=None,
         perc_eval=None,
         fit_predictor_args=fit_args,
+        split_indices=split_indices,
     )
 
     with torch.no_grad():
@@ -330,7 +342,7 @@ def main() -> Dict[str, Dict[str, object]]:
     detector_payload = {
         "version": 1,
         "detector_type": "clip_classifier",
-        "name": clip_detector.name,
+        "detector_id": detector_label,
         "classes": list(clip_detector.classes),
         "temperature": float(clip_detector.temperature),
         "dropout": float(config.classifier_dropout),
@@ -342,14 +354,14 @@ def main() -> Dict[str, Dict[str, object]]:
             k: v.detach().cpu() for k, v in clip_detector.classifier.state_dict().items()
         },
     }
-    detector_path = detector_dir / f"{clip_detector.name}.pt"
+    detector_path = detector_dir / f"{detector_label}.pt"
     torch.save(detector_payload, detector_path)
     print(f"[DETECTOR] metadata saved to {detector_path}")
 
     eval_metrics = result.get("eval_metrics")
     test_metrics = result.get("test_metrics")
     summary_row = {
-        "detector": clip_detector.name,
+        "detector": detector_label,
         "train_samples": result["train_samples"],
         "eval_samples": result["eval_samples"],
         "test_samples": result["test_samples"],

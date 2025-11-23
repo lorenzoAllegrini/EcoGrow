@@ -287,7 +287,6 @@ class ClipClassifierDetector:
 
     def __init__(
         self,
-        name: str,
         classes: Sequence[str],
         *,
         clip_model: nn.Module,
@@ -297,15 +296,17 @@ class ClipClassifierDetector:
         train_backbone: bool = False,
         temperature: float | None = None,
         text_encoder: Optional[nn.Module] = None,
+        detector_id: Optional[str] = None,
     ) -> None:
-        self.name = name
         self.classes = list(classes)
+        self.label2idx = {c: i for i, c in enumerate(self.classes)}
         self.clip_model = clip_model
         self.device = device
         self.preprocess = preprocess
         self.temperature = temperature if temperature is not None else 0.07
         self.train_backbone = bool(train_backbone)
         self.text_encoder = text_encoder
+        self.detector_id = detector_id or self.__class__.__name__
 
         embed_dim = self._infer_embed_dim()
 
@@ -361,6 +362,7 @@ class ClipClassifierDetector:
         prompts_embeds: Optional[torch.Tensor] = None,
         tokenized_prompts: Optional[torch.Tensor] = None,
         text_features: Optional[torch.Tensor] = None,
+        restricted_indices: Optional[List[int]] = None,
     ) -> torch.Tensor:
         images = images.to(self.device)
         use_prompt_logits = (
@@ -372,6 +374,10 @@ class ClipClassifierDetector:
         self._set_module_mode(self._backbone_module(), training=backbone_mode)
         self._set_module_mode(self.classifier, training=require_grad and not use_prompt_logits)
 
+        if restricted_indices:
+            prompts_embeds = prompts_embeds[restricted_indices] if prompts_embeds else None
+            tokenized_prompts = tokenized_prompts[restricted_indices] if tokenized_prompts else None
+            text_features = text_features[restricted_indices] if text_features else None
         if use_prompt_logits:
             feats = self.encode_images(images)
             txt = self._resolve_text_features(
@@ -398,25 +404,51 @@ class ClipClassifierDetector:
         else:
             module.eval()
 
-    def predict(self, tensor: torch.Tensor, *, unknown_threshold: float) -> Dict[str, object]:
+    def predict(
+        self,
+        tensor: torch.Tensor,
+        *,
+        unknown_threshold: float,
+        prompts_embeds: Optional[torch.Tensor] = None,
+        tokenized_prompts: Optional[torch.Tensor] = None,
+        text_features: Optional[torch.Tensor] = None,
+        restricted_diseases: List[str] | None = None,
+    ) -> Dict[str, object]:
+        restricted_indices = (
+            [self.label2idx[d] for d in restricted_diseases if d in self.label2idx]
+            if restricted_diseases
+            else None
+        )
         with torch.no_grad():
-            logits = self.logits(tensor, require_grad=False)
+            logits = self.logits(
+                tensor,
+                require_grad=False,
+                prompts_embeds=prompts_embeds,
+                tokenized_prompts=tokenized_prompts,
+                text_features=text_features,
+                restricted_indices=restricted_indices,
+            )
             probs = logits.softmax(dim=-1).squeeze(0)
 
+        labels = (
+            [self.classes[i] for i in restricted_indices]
+            if restricted_indices
+            else self.classes
+        )
+
         top_prob, top_idx = probs.max(dim=0)
-        raw_label = self.classes[top_idx.item()]
+        raw_label = labels[top_idx.item()]
         probability = float(top_prob.item())
         label = raw_label if probability >= float(unknown_threshold) else "unknown"
 
         per_class = [
             {"label": cls, "probability": float(probs[i].item())}
-            for i, cls in enumerate(self.classes)
+            for i, cls in enumerate(labels)
         ]
         per_class.sort(key=lambda item: item["probability"], reverse=True)
 
         return {
-            "detector": self.name,
-            "family": self.name,  # backward compatibility
+            "detector": self.detector_id,
             "prediction": label,
             "raw_label": raw_label,
             "probability": probability,
@@ -466,21 +498,21 @@ class ConvNextDetector:
         self,
         classes: Sequence[str],
         *,
-        model_name: str = "convnext_small",
         pretrained: bool = True,
         device: torch.device | str = "cpu",
         preprocess=None,
         train_backbone: bool = False,
         drop_rate: float = 0.0,
+        detector_id: Optional[str] = None,
         **model_kwargs,
     ) -> None:
         self.classes = list(classes)
         self.device = torch.device(device)
-        # Nome leggibile usato da trainer e logging
-        self.name = model_name
+        self.detector_id = detector_id or self.__class__.__name__
         self.preprocess = preprocess
         self.train_backbone = bool(train_backbone)
 
+        model_name = model_kwargs.pop("model_name", "convnext_small")
         self.model = timm.create_model(
             model_name,
             pretrained=pretrained,
@@ -508,25 +540,54 @@ class ConvNextDetector:
         with torch.no_grad():
             return self.model(images)
 
-    def predict(self, tensor: torch.Tensor, *, unknown_threshold: float = 0.0) -> Dict[str, object]:
+    def _resolve_restricted_indices(
+        self,
+        restricted_indices: Optional[Sequence[int]] = None,
+        restricted_classes: Optional[Sequence[str]] = None,
+    ) -> Optional[List[int]]:
+        if restricted_indices is None and restricted_classes:
+            restricted_indices = [
+                i for i, cls in enumerate(self.classes) if cls in restricted_classes
+            ]
+
+        if restricted_indices:
+            filtered = [i for i in restricted_indices if 0 <= i < len(self.classes)]
+            return filtered or None
+        return None
+
+    def predict(
+        self,
+        tensor: torch.Tensor,
+        *,
+        unknown_threshold: float = 0.0,
+        restricted_indices: Optional[Sequence[int]] = None,
+        restricted_classes: Optional[Sequence[str]] = None,
+    ) -> Dict[str, object]:
+        indices = self._resolve_restricted_indices(
+            restricted_indices=restricted_indices,
+            restricted_classes=restricted_classes,
+        )
         with torch.no_grad():
             logits = self.logits(tensor, require_grad=False)
-            probs = logits.softmax(dim=-1).squeeze(0)
+            selected_logits = logits[:, indices] if indices else logits
+            probs = selected_logits.softmax(dim=-1).squeeze(0)
+
+        labels = [self.classes[i] for i in indices] if indices else self.classes
 
         top_prob, top_idx = probs.max(dim=0)
-        raw_label = self.classes[top_idx.item()]
+        raw_label = labels[top_idx.item()]
         probability = float(top_prob.item())
         label = raw_label if probability >= float(unknown_threshold) else "unknown"
 
         per_class = [
-            {"label": cls, "probability": float(probs[i].item())}
-            for i, cls in enumerate(self.classes)
+            {"label": labels[i], "probability": float(probs[i].item())}
+            for i in range(probs.shape[-1])
         ]
         per_class.sort(key=lambda item: item["probability"], reverse=True)
 
         return {
-            "detector": self.name,
-            "family": self.name,
+            "detector": self.detector_id,
+            "family": self.detector_id,
             "prediction": label,
             "raw_label": raw_label,
             "probability": probability,
