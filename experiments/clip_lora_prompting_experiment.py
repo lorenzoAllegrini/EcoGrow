@@ -6,7 +6,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 import torch
 import torch.nn.functional as F
 from peft import LoraConfig, LoraModel
@@ -40,6 +40,8 @@ class Config:
     perc_eval: float
     lr: float
     classifier_dropout: float
+    use_segmentation: bool
+    segmenter: str
     num_splits: int
 
 
@@ -68,7 +70,7 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--epochs",
         type=int,
-        default=7,
+        default=20,
         help="Numero di epoche di fine-tuning per ciascuna famiglia.",
     )
     parser.add_argument(
@@ -86,7 +88,7 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--lr",
         type=float,
-        default=5e-4,
+        default=2e-4,
         help="Learning rate per l'ottimizzatore AdamW.",
     )
     parser.add_argument(
@@ -98,8 +100,19 @@ def _parse_args() -> Config:
     parser.add_argument(
         "--num-splits",
         type=int,
-        default=1,
+        default=3,
         help="Numero di split di cross validation (usa 1 per disabilitare la CV).",
+    )
+    parser.add_argument(
+        "--no-segmentation",
+        action="store_true",
+        help="Disabilita la segmentazione per usare le immagini originali.",
+    )
+    parser.add_argument(
+        "--segmenter",
+        choices=["current", "convnext"],
+        default="current",
+        help="Segmenter da applicare (impostare --no-segmentation per disattivarlo).",
     )
     args = parser.parse_args()
 
@@ -126,7 +139,31 @@ def _parse_args() -> Config:
         perc_eval=max(0.0, float(args.perc_eval)),
         lr=args.lr,
         classifier_dropout=max(0.0, float(args.classifier_dropout)),
+        use_segmentation=not bool(args.no_segmentation),
+        segmenter=str(args.segmenter),
         num_splits=max(1, int(args.num_splits)),
+    )
+
+
+def _resolve_segment_fn(
+    use_segmentation: bool, segmenter: str
+) -> Optional[Callable]:
+    if not use_segmentation:
+        return None
+    if segmenter == "convnext":
+        # Allinea alla pipeline usata nell'esperimento ConvNeXt.
+        return make_segment_fn(
+            segment_plant_rgba,
+            crop_to_alpha_bbox,
+            black_bg_composite,
+            pad=12,
+        )
+    # Pipeline di segmentazione predefinita attuale.
+    return make_segment_fn(
+        segment_plant_rgba,
+        crop_to_alpha_bbox,
+        black_bg_composite,
+        pad=12,
     )
 
 
@@ -170,8 +207,6 @@ def _collect_class_prompts(prompt_config: Dict[str, object]) -> Dict[str, List[s
 def _default_prompt(label: str) -> str:
     pretty = label.replace("_", " ")
     return f"a close-up photo of a plant showing {pretty}"
-
-
 
 
 def main() -> Dict[str, Dict[str, object]]:
@@ -229,11 +264,8 @@ def main() -> Dict[str, Dict[str, object]]:
         data_root=str(config.dataset_path),
     )
 
-    segment_fn = make_segment_fn(
-        segment_plant_rgba,
-        crop_to_alpha_bbox,
-        black_bg_composite,
-        pad=12,
+    segment_fn = _resolve_segment_fn(
+        config.use_segmentation, config.segmenter
     )
     with open(config.prompts_config, "r", encoding="utf-8") as f:
         prompt_config = json.load(f)
@@ -309,12 +341,12 @@ def main() -> Dict[str, Dict[str, object]]:
         "batch_size": config.batch_size,
         "lr": config.lr,
         "log_fn": lambda msg: print(f"[GLOBAL] {msg}"),
-        "patience_before_stopping": 1,
+        "patience_before_stopping": 2,
     }
 
     result = benchmark.run(
         trainer=trainer,
-        segment_fn=None,
+        segment_fn=segment_fn,
         perc_eval=None,
         fit_predictor_args=fit_args,
         split_indices=split_indices,

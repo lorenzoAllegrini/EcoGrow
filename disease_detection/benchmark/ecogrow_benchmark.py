@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+import math
 
 import torch
 from torch.utils.data import DataLoader
@@ -197,12 +198,14 @@ class EcogrowBenchmark:
             min_delta=fit_params.min_delta,
             restore_best=fit_params.restore_best,
         )
+        epochs_trained = len(history) if history is not None else fit_params.epochs
         eval_metrics: Optional[EpochMetrics] = None
         if eval_loader is not None and hasattr(trainer, "eval"):
             eval_metrics = trainer.eval(eval_loader)
 
         results: Dict[str, Any] = {
             "train_history": history,
+            "epochs_trained": epochs_trained,
             "train_samples": len(train_loader.dataset),
             "eval_samples": len(val_data) if val_data is not None else 0,
             "temperature": getattr(trainer, "temperature", None),
@@ -331,6 +334,22 @@ class EcogrowBenchmark:
         os.makedirs(self.run_dir, exist_ok=True)
 
         fit_params = self._prepare_fit_params(fit_predictor_args)
+        early_stopping_active = fit_params.patience_before_stopping is not None
+
+        split_epochs: List[int] = []
+        for res in split_results.values():
+            if "epochs_trained" in res and res["epochs_trained"] is not None:
+                split_epochs.append(int(res["epochs_trained"]))
+            elif "train_history" in res and res["train_history"] is not None:
+                split_epochs.append(len(res["train_history"]))
+
+        avg_epochs_before_es: Optional[float] = (
+            sum(split_epochs) / len(split_epochs) if split_epochs else None
+        )
+
+        retrain_epochs = fit_params.epochs
+        if early_stopping_active and avg_epochs_before_es is not None:
+            retrain_epochs = max(1, int(math.ceil(avg_epochs_before_es)))
 
         final_trainer = (
             trainer_factory()
@@ -362,16 +381,23 @@ class EcogrowBenchmark:
                 final_trainer.parameters(), lr=fit_params.lr
             )
 
+        retrain_note = (
+            f"ceil avg pre-ES={avg_epochs_before_es:.2f}"
+            if early_stopping_active and avg_epochs_before_es is not None
+            else "fixed epochs"
+        )
+
         logging.info(
-            "Retraining on train+val before testing | epochs=%d batch_size=%d",
-            fit_params.epochs,
+            "Retraining on train+val before testing | epochs=%d (%s) batch_size=%d",
+            retrain_epochs,
+            retrain_note,
             fit_params.batch_size,
         )
 
         train_history = final_trainer.fit(
             optimizer=optimizer,
             train_loader=train_loader,
-            epochs=fit_params.epochs,
+            epochs=retrain_epochs,
             scheduler=fit_params.scheduler,
             grad_clip=fit_params.grad_clip,
             log_fn=fit_params.log_fn,
@@ -412,6 +438,9 @@ class EcogrowBenchmark:
             "split_results": split_results,
             "test_samples": len(test_data),
         }
+        result["retrain_epochs"] = retrain_epochs
+        if avg_epochs_before_es is not None:
+            result["avg_epochs_before_es"] = avg_epochs_before_es
 
         if averaged_eval is not None:
             result["eval_metrics"] = averaged_eval
