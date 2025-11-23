@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from disease_detection.benchmark.ecogrow_benchmark import EcogrowBenchmark
-from disease_detection.models.open_clip_wrapper import init_open_clip, ClipClassifierDetector
+from disease_detection.models.model_wrappers import init_open_clip, ClipClassifierDetector
 from disease_detection.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
