@@ -4,7 +4,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -50,6 +50,8 @@ class ConvNextConfig:
     train_backbone: bool
     use_pretrained: bool
     detector_name: str
+    use_segmentation: bool
+    segmenter: str
 
 
 def _parse_args() -> ConvNextConfig:
@@ -82,6 +84,17 @@ def _parse_args() -> ConvNextConfig:
         default="global",
         help="Human-readable name for the detector, used in logs and outputs.",
     )
+    parser.add_argument(
+        "--no-segmentation",
+        action="store_true",
+        help="Disable segmentation; use raw images instead.",
+    )
+    parser.add_argument(
+        "--segmenter",
+        choices=["current", "convnext"],
+        default="convnext",
+        help="Select which segmentation pipeline to apply (ignored if --no-segmentation).",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
@@ -106,6 +119,8 @@ def _parse_args() -> ConvNextConfig:
         train_backbone=bool(args.train_backbone),
         use_pretrained=not bool(args.no_pretrained),
         detector_name=args.detector_name,
+        use_segmentation=not bool(args.no_segmentation),
+        segmenter=str(args.segmenter),
     )
 
 
@@ -131,6 +146,28 @@ def _build_transforms(image_size: int) -> SplitTransforms:
     return SplitTransforms(train_transform, eval_transform)
 
 
+def _resolve_segment_fn(
+    use_segmentation: bool, segmenter: str
+) -> Optional[Callable]:
+    if not use_segmentation:
+        return None
+    if segmenter == "current":
+        # Matches the segmentation used by CLIP/LoRA experiments.
+        return make_segment_fn(
+            segment_plant_rgba,
+            crop_to_alpha_bbox,
+            black_bg_composite,
+            pad=12,
+        )
+    # Default ConvNeXt segmentation pipeline.
+    return make_segment_fn(
+        segment_plant_rgba,
+        crop_to_alpha_bbox,
+        black_bg_composite,
+        pad=12,
+    )
+
+
 def run_convnext_experiment() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -141,11 +178,8 @@ def run_convnext_experiment() -> Dict[str, Dict[str, object]]:
 
     transforms_spec = _build_transforms(config.image_size)
 
-    segment_fn = make_segment_fn(
-        segment_plant_rgba,
-        crop_to_alpha_bbox,
-        black_bg_composite,
-        pad=12,
+    segment_fn = _resolve_segment_fn(
+        config.use_segmentation, config.segmenter
     )
 
     preview_dataset = PlantData(
@@ -185,7 +219,7 @@ def run_convnext_experiment() -> Dict[str, Dict[str, object]]:
 
     result = benchmark.run(
         trainer=trainer,
-        segment_fn=None,
+        segment_fn=segment_fn,
         fit_predictor_args=fit_args,
     )
 
