@@ -19,3 +19,6 @@ dataset*
 __pycache__/...
 *.pyc
 .DS_Store
+*.pth
+model_selection
+detectors

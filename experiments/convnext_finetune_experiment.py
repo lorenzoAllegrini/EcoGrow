@@ -130,6 +130,10 @@ def _build_transforms(image_size: int) -> SplitTransforms:
 def run_convnext_experiment() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # if device is cpu print an errore message and exit
+    if device.type == "cpu":
+        print("Error: No CUDA-compatible GPU found. ConvNeXt fine-tuning requires a GPU.")
+        sys.exit(1)
 
     transforms_spec = _build_transforms(config.image_size)
 
