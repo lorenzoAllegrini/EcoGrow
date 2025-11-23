@@ -4,10 +4,9 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Optional
 
 import torch
-from torch.utils.data import DataLoader
 from torchvision import transforms
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -16,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from disease_detection.benchmark.ecogrow_benchmark import EcogrowBenchmark
 from disease_detection.data.plant_data import PlantData, make_segment_fn
-from disease_detection.models.open_clip_wrapper import ConvNextDetector
+from disease_detection.models.model_wrappers import ConvNextDetector
 from disease_detection.preprocessing.image_segmentator import (
     black_bg_composite,
     crop_to_alpha_bbox,
@@ -66,7 +65,7 @@ def _parse_args() -> ConvNextConfig:
     parser.add_argument("--model-name", default="convnext_small", help="Name of the timm ConvNeXt variant.")
     parser.add_argument("--image-size", type=int, default=224, help="Input size for ConvNeXt transforms.")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size for training and evaluation.")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of fine-tuning epochs.")
+    parser.add_argument("--epochs", type=int, default=1, help="Number of fine-tuning epochs.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for AdamW.")
     parser.add_argument("--dropout", type=float, default=0.0, help="Drop rate applied inside the ConvNeXt head.")
     parser.add_argument(
@@ -172,10 +171,10 @@ def run_convnext_experiment() -> Dict[str, Dict[str, object]]:
     config = _parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # if device is cpu print an errore message and exit
-    if device.type == "cpu":
+    """if device.type == "cpu":
         print("Error: No CUDA-compatible GPU found. ConvNeXt fine-tuning requires a GPU.")
         sys.exit(1)
-
+    """
     transforms_spec = _build_transforms(config.image_size)
 
     segment_fn = _resolve_segment_fn(
