@@ -5,7 +5,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 import torch
 import torch.nn.functional as F
 from peft import LoraConfig, LoraModel
@@ -25,7 +25,7 @@ from disease_detection.preprocessing.image_segmentator import (
     segment_plant_rgba,
 )
 from disease_detection.training.trainers import ClipFineTuneEngine
-from disease_detection.data.plant_data import PlantData, make_segment_fn, DISEASE_MAPPING
+from disease_detection.data.plant_data import make_segment_fn, DISEASE_MAPPING
 from disease_detection.models.checkpoint_cache import ensure_mobileclip_checkpoint
 
 @dataclass(frozen=True)
@@ -42,6 +42,7 @@ class Config:
     use_segmentation: bool
     num_workers: int
     num_splits: int
+    segmenter: str
 
 
 def _parse_args() -> Config:
@@ -113,6 +114,12 @@ def _parse_args() -> Config:
         default=3,
         help="Numero di split di cross validation (usa 1 per disabilitare la CV).",
     )
+    parser.add_argument(
+        "--segmenter",
+        choices=["current", "convnext"],
+        default="current",
+        help="Seleziona la pipeline di segmentazione da applicare (usa --no-segmentation per disabilitare).",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path).expanduser().resolve()
@@ -141,8 +148,30 @@ def _parse_args() -> Config:
         use_segmentation=not bool(args.no_segmentation),
         num_workers=max(0, int(args.num_workers)),
         num_splits=max(1, int(args.num_splits)),
+        segmenter=str(args.segmenter),
     )
 
+
+def _resolve_segment_fn(
+    use_segmentation: bool, segmenter: str
+) -> Optional[Callable]:
+    if not use_segmentation:
+        return None
+    if segmenter == "convnext":
+        # Allinea alla pipeline usata nell'esperimento ConvNeXt.
+        return make_segment_fn(
+            segment_plant_rgba,
+            crop_to_alpha_bbox,
+            black_bg_composite,
+            pad=12,
+        )
+    # Pipeline di segmentazione predefinita attuale.
+    return make_segment_fn(
+        segment_plant_rgba,
+        crop_to_alpha_bbox,
+        black_bg_composite,
+        pad=12,
+    )
 
 
 def main() -> Dict[str, Dict[str, object]]:
@@ -200,15 +229,9 @@ def main() -> Dict[str, Dict[str, object]]:
         data_root=str(config.dataset_path),
     )
 
-    if config.use_segmentation:
-        segment_fn = make_segment_fn(
-            segment_plant_rgba,
-            crop_to_alpha_bbox,
-            black_bg_composite,
-            pad=12,
-        )
-    else:
-        segment_fn = None
+    segment_fn = _resolve_segment_fn(
+        config.use_segmentation, config.segmenter
+    )
     with open(config.prompts_config, "r", encoding="utf-8") as f:
         prompt_config = json.load(f)
 
@@ -247,7 +270,7 @@ def main() -> Dict[str, Dict[str, object]]:
 
     result = benchmark.run(
         trainer=trainer,
-        segment_fn=None,
+        segment_fn=segment_fn,
         perc_eval=None,
         fit_predictor_args=fit_args,
         split_indices=split_indices,
