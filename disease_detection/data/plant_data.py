@@ -245,7 +245,7 @@ class PlantData(Dataset):
                 f"Nessuna immagine trovata per {target} nello split '{self.split}'."
             )
 
-        self.samples = samples[:100]
+        self.samples = samples
         self.class_to_idx = class_to_idx
         self.idx_to_class = {idx: label for label, idx in class_to_idx.items()}
 
